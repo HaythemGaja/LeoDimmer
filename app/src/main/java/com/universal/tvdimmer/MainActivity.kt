@@ -129,7 +129,7 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
             "Accessibility service: $accessibility\n" +
             "Map three remote buttons below. Until you do, no key is intercepted."
         return GuidanceStylist.Guidance(
-            "TV Dimmer",
+            "LeoDimmer",
             description,
             "Settings",
             null

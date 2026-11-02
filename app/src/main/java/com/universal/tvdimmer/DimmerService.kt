@@ -167,9 +167,9 @@ class DimmerService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "TV Dimmer",
+                "LeoDimmer",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "Keeps the TV Dimmer overlay running" }
+            ).apply { description = "Keeps the LeoDimmer overlay running" }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
@@ -188,7 +188,7 @@ class DimmerService : Service() {
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("TV Dimmer")
+            .setContentTitle("LeoDimmer")
             .setContentText(text)
             .setContentIntent(pending)
             .setOngoing(true)

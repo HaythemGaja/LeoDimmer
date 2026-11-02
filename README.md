@@ -1,6 +1,12 @@
-# TV Dimmer — Android TV overlay dimmer
+# LeoDimmer — Android TV overlay dimmer
 
 Pure Kotlin, Android Studio project. Package: `com.universal.tvdimmer`.
+
+> Renamed in v1.1: the app was "TV Dimmer" in v1.0, but that name is
+> already used by TvDimmer - NightCompanion, so the visible name is now
+> LeoDimmer. The package (`com.universal.tvdimmer`), the
+> `tv_dimmer_prefs` settings, and the signing key are unchanged, so v1.1
+> updates a v1.0 install in place instead of installing side-by-side.
 
 Why an overlay instead of the system brightness setting: on a Xiaomi Mi Box
 there is no panel and HDMI carries no brightness signal, so the Android
@@ -59,10 +65,10 @@ adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "
 
 ## First run (onboarding)
 
-1. Install, open TV Dimmer from the TV home screen.
+1. Install, open LeoDimmer from the TV home screen.
 2. Grant **Display over other apps** — the "Overlay permission" row opens
    `ACTION_MANAGE_OVERLAY_PERMISSION` for this app.
-3. Enable **TV Dimmer** in Accessibility settings — the
+3. Enable **LeoDimmer** in Accessibility settings — the
    "Accessibility service" row opens `ACTION_ACCESSIBILITY_SETTINGS`.
    Without this step, remote buttons cannot be intercepted globally; the
    app will not swallow keys it cannot act on.
@@ -93,6 +99,8 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.1** — rename only: visible name TV Dimmer → LeoDimmer (see note at
+  the top). No behaviour change; package, prefs, and signing key unchanged.
 - **v1.0** — first build. `minSdk 28` on purpose: the Xiaomi Mi Box in use
   is a MIBOX4 on Android 9 (API 28), and a `minSdk 30` build would refuse to
   install on it. The overlay / foreground-service code is written in the

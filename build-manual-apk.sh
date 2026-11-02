@@ -1,16 +1,16 @@
 #!/bin/bash
-# Manual SDK-tools build for TV Dimmer (aapt2 + kotlinc + d8 + zipalign + apksigner).
+# Manual SDK-tools build for LeoDimmer (aapt2 + kotlinc + d8 + zipalign + apksigner).
 # Used on machines where the Gradle daemon cannot run (this VM's daemon dies
 # with a loopback protocol error); the Gradle project in this repo is still
 # the canonical Android Studio build -- this script produces the same
 # debug APK from the same sources, including the Leanback library resources.
 # Usage: ./build-manual-apk.sh [output-apk]
-# Default output: /tmp/tvdimmer-build/TVDimmer-v1.0.apk
+# Default output: /tmp/tvdimmer-build/LeoDimmer-v1.1.apk
 # The debug keystore lives OUTSIDE the repo at
 # ~/workspace/.keystores/tvdimmer-debug.keystore (never committed).
 set -e
 cd "$(dirname "$0")"
-OUT_APK="${1:-/tmp/tvdimmer-build/TVDimmer-v1.0.apk}"
+OUT_APK="${1:-/tmp/tvdimmer-build/LeoDimmer-v1.1.apk}"
 BT="$HOME/workspace/android-build/sdk/build-tools/34.0.0"
 PLAT="$HOME/workspace/android-build/sdk/platforms/android-34/android.jar"
 KOTLINC="$HOME/workspace/android-build/kotlin-1.9.24/bin/kotlinc"
@@ -73,8 +73,8 @@ sed 's|<manifest |<manifest package="com.universal.tvdimmer" |' "$SRC/AndroidMan
   "$OUT"/compiled/*.zip \
   --min-sdk-version 28 \
   --target-sdk-version 34 \
-  --version-code 1 \
-  --version-name 1.0
+  --version-code 2 \
+  --version-name 1.1
 
 # ---- javac (R.java for app + libraries) + kotlinc ----
 find "$OUT/gen" -name "*.java" > "$OUT/sources-java.txt"
