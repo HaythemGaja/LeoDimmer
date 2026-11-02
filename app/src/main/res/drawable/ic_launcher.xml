@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple launcher icon: yellow disc (the #FFD166 accent) dimmed by a black
+     half, so the icon itself reads as "dimmer" on the TV home screen. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <path
+        android:fillColor="#FFD166"
+        android:pathData="M48,48m-40,0a40,40 0,1 0,80 0a40,40 0,1 0,-80 0" />
+    <path
+        android:fillColor="#FF000000"
+        android:fillAlpha="0.55"
+        android:pathData="M48,8a40,40 0,0 0,0 80z" />
+</vector>
