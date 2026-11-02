@@ -10,6 +10,14 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        TV power link. HDMI_CEC is signature|privileged, so a sideloaded app is
+        never actually granted it: TvPowerLink calls the CEC API reflectively
+        and falls back to a brief HDMI activity. Declared so the intent is
+        visible (and so the app can use CEC if it is ever installed privileged).
+    -->
+    <uses-permission android:name="android.permission.HDMI_CEC" />
+
     <!-- Android TV: a touchscreen is not required; Leanback launcher is the target. -->
     <uses-feature
         android:name="android.software.leanback"
@@ -36,6 +44,19 @@
         </activity>
 
         <!--
+            TV power link helper: invisible, non-interactive, finishes itself.
+            Launched only when HDMI-CEC one-touch-play is unavailable, to make
+            the box drive HDMI output and wake a CEC-enabled TV.
+        -->
+        <activity
+            android:name=".WakeActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!--
             Headless ADB control. Exported on purpose: `adb shell am startservice`
             runs outside the app, so a non-exported service would reject it.
             This is a local-device control surface for the owner's own box, not
@@ -44,7 +65,11 @@
         <service
             android:name=".DimmerService"
             android:exported="true"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-controlled screen dimming overlay for Android TV" />
+        </service>
 
         <!--
             Global key interception. The BIND_ACCESSIBILITY_SERVICE permission
@@ -64,7 +89,8 @@
         </service>
 
         <!-- Persistent lifecycle: restart the overlay after a reboot, but only
-             if the user had previously started it (service_enabled in prefs). -->
+             if the user had previously started it (service_enabled in prefs).
+             Also the "box powered on" trigger for the TV power link. -->
         <receiver
             android:name=".BootReceiver"
             android:exported="false">

@@ -17,8 +17,11 @@ import android.view.accessibility.AccessibilityEvent
  *   1. ANY key while blackout is active -> exits blackout (audio-only mode
  *      ends on the first press; that press is consumed so it does not also
  *      fire in the app underneath the black screen).
- *   2. The three user-mapped keys -> BRIGHTER / DIMMER / TOGGLE_BLACKOUT.
- * Everything else is passed through untouched (return false).
+ *   2. The four user-mapped keys -> BRIGHTER / DIMMER / TOGGLE_BLACKOUT /
+ *      TOGGLE_AMBIENT (sleep light).
+ * Everything else is passed through untouched (return false). Ambient mode
+ * deliberately does NOT swallow unmapped keys: it is a viewing state, not a
+ * black screen, so normal navigation keeps working while the light is on.
  *
  * Safety: if the overlay permission is gone, mapped keys are NOT swallowed
  * -- a dimmer that eats remote buttons without dimming anything would be
@@ -67,7 +70,8 @@ class DimmerAccessibilityService : AccessibilityService() {
 
         if (!canDraw) return false
 
-        // Rule 2: mapped keys only.
+        // Rule 2: mapped keys only. A key mapped to more than one action
+        // resolves to the first match (brighter, dimmer, blackout, ambient).
         return when (keyCode) {
             DimmerPrefs.getKey(this, DimmerPrefs.KEY_BRIGHTER) -> {
                 startDimmerService(DimmerService.ACTION_BRIGHTER, null)
@@ -81,6 +85,10 @@ class DimmerAccessibilityService : AccessibilityService() {
                 startDimmerService(DimmerService.ACTION_TOGGLE_BLACKOUT, null)
                 true
             }
+            DimmerPrefs.getKey(this, DimmerPrefs.KEY_AMBIENT) -> {
+                startDimmerService(DimmerService.ACTION_TOGGLE_AMBIENT, null)
+                true
+            }
             else -> false
         }
     }
@@ -89,7 +97,8 @@ class DimmerAccessibilityService : AccessibilityService() {
         if (keyCode == DimmerPrefs.UNSET) return false
         return keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_BRIGHTER) ||
             keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_DIMMER) ||
-            keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_TOGGLE)
+            keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_TOGGLE) ||
+            keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_AMBIENT)
     }
 
     private fun startDimmerService(action: String?, value: Int?) {

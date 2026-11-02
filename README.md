@@ -25,29 +25,72 @@ Architectural sources, combined here (not vendored):
 ## What it does
 
 - **Remap any remote button.** Open the app and use the Leanback settings
-  screen (D-pad navigable, 10-foot UI) to map three actions:
-  Increase Brightness, Decrease Brightness, Toggle Blackout. Select a row and
-  press the physical button you want — the dialog captures its raw integer
-  keycode and stores it in `SharedPreferences` named `tv_dimmer_prefs`.
-  Press BACK in the dialog to cancel. Mappings start **unset**: nothing is
-  intercepted until you choose a button, so DPAD/volume navigation is never
-  hijacked by default.
+  screen (D-pad navigable, 10-foot UI) to map four actions:
+  Increase Brightness, Decrease Brightness, Toggle Blackout, Sleep Light.
+  Select a row and press the physical button you want — the dialog captures
+  its raw integer keycode and stores it in `SharedPreferences` named
+  `tv_dimmer_prefs`. Press BACK in the dialog to cancel. Mappings start
+  **unset**: nothing is intercepted until you choose a button, so DPAD/volume
+  navigation is never hijacked by default.
 - **Global interception.** `DimmerAccessibilityService` reads those keycodes
   on every key event and, over any app or system screen:
   - mapped Increase key → overlay opacity −10% (brighter)
   - mapped Decrease key → overlay opacity +10% (dimmer)
   - mapped Toggle key → blackout on/off
+  - mapped Sleep Light key → ambient (warm dim) mode on/off
   - **any** key while blackout is active → blackout exits instantly, and
     that press is consumed so it does not also fire underneath the black screen.
 - **Blackout = audio-only mode.** At 0% brightness the overlay is a solid
   black view at `alpha = 1.0f`. Audio keeps playing; the picture is gone
   until any button (or the toggle key) restores the pre-blackout level.
+- **Ambient / sleep light.** A warm, dim viewing state: the same overlay
+  tinted warm brown instead of black, held at a configurable level (10–60%,
+  default 20%). Unmapped keys keep working, so it is a viewing mode and not a
+  blackout. The mapped brightness keys sculpt the light while it is on, and
+  the sleep-light key (or the blackout key) leaves it. Never resumed after a
+  restart.
+- **Sleep timer.** Pick a duration (off / 10 / 15 / 20 / 30 / 45 / 60 min) on
+  the "Sleep timer" row. It arms when the sleep light comes on, the ongoing
+  notification counts down ("fades out in 14 min"), and when it reaches zero
+  the light fades to black over 20 seconds instead of snapping off. Any remote
+  press during the fade cancels it — a key press means you are still awake —
+  and the light stays on. After the fade the screen is in normal blackout, so
+  any key (or the toggle key) restores the *sleep level*, not full brightness:
+  no blinding flash in a dark room. The timer is cleared whenever ambient mode
+  ends, the dimmer is turned off, or the app restarts, so a stray timer can
+  never dim the screen hours later.
 - **Anti-flicker.** The overlay view is inflated once. Brightness steps only
   mutate `view.alpha` in memory — no re-inflate, no remove/re-add, no
   `updateViewLayout` per step. Even at 100% brightness the view stays
   attached at alpha 0, so the next dim step has no attach flash. This is
   specifically for the Xiaomi system compositor, which used to flash a bright
   frame on overlay re-attach.
+- **Turn off.** The settings screen has "Turn dimmer off", and the ongoing
+  notification has a "Turn off" action. Both remove the overlay and clear the
+  restart-at-boot flag; nothing keeps running.
+- **TV power link (best effort).** Two toggles:
+  - *TV power on with box* — on boot and when the box wakes after a long
+    standby, try HDMI-CEC One Touch Play. If the platform denies the CEC call
+    (it is `signature|privileged`, so a sideloaded app never holds it), the
+    invisible `WakeActivity` is launched briefly instead: an activity launch
+    makes the box drive HDMI output again, which most TVs treat as a wake
+    signal. Only attempted when "Display over other apps" is granted, since
+    that is what allows a background activity launch.
+  - *TV power off with box* — attempts CEC standby on shutdown. A source device
+    has no public API for this, so on a retail box it is normally a no-op;
+    the TV's own "auto power off when the source goes away" CEC setting is the
+    reliable route. The row says so rather than pretending.
+- **Fail-safes.** Both "no picture" states are one unrecoverable press away for
+  a user who cannot reach a mapped key, so:
+  - the service never resumes into blackout or ambient mode — a restart,
+    crash, force stop or reboot comes back to the pre-blackout / pre-ambient
+    level;
+  - if blackout is entered while the accessibility service is **not**
+    enabled, nothing can press "any key", so blackout auto-restores after
+    one minute (the notification says so). This applies to the sleep timer
+    too: with the accessibility service off, the picture comes back dimly a
+    minute after the light fades out. Leave the accessibility service enabled
+    if you want the screen to stay dark for the night.
 
 ## Headless ADB control
 
@@ -58,10 +101,17 @@ exported for this; it is a local-device surface, not a network service):
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "BRIGHTER"
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "DIMMER"
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_PERCENT" --ei value [0-100]
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "TOGGLE_AMBIENT"
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_AMBIENT_LEVEL" --ei value [5-60]
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_SLEEP_TIMER" --ei value [0-120]
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "STOP"
 ```
 
 `SET_PERCENT` sets **brightness**: 100 = full bright (no dimming),
-0 = blackout. `BRIGHTER` / `DIMMER` step by 10%.
+0 = blackout. `BRIGHTER` / `DIMMER` step by 10%. `SET_SLEEP_TIMER` stores the
+sleep-timer duration in minutes (0 = off) and, if the sleep light is already
+on, re-arms the countdown from now. `STOP` turns the dimmer off and disables
+the boot restart.
 
 ## First run (onboarding)
 
@@ -72,8 +122,11 @@ adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "
    "Accessibility service" row opens `ACTION_ACCESSIBILITY_SETTINGS`.
    Without this step, remote buttons cannot be intercepted globally; the
    app will not swallow keys it cannot act on.
-4. Map the three buttons, then test with the "Test:" rows before relying
+4. Map the buttons, then test with the "Test:" rows before relying
    on the global keys.
+5. Optional: grant the notification permission (asked once, Android 13+) so
+   the ongoing notification shows the current mode; enable the TV power
+   toggles if the TV responds to CEC.
 
 Platform limits, stated plainly:
 - HOME and POWER never reach an app or an accessibility service, so they
@@ -82,7 +135,10 @@ Platform limits, stated plainly:
   disables it, global keys stop working until it is re-enabled (the settings
   screen shows this as MISSING).
 - After a reboot the overlay restarts only if it had been started before
-  (`BootReceiver` + `service_enabled` in prefs).
+  (`BootReceiver` + `service_enabled` in prefs), and it never restarts in
+  blackout or ambient mode.
+- HDMI-CEC control is a privileged permission; the TV power link works on
+  boxes that grant it, and otherwise depends on the box's own CEC settings.
 
 ## Build
 
@@ -99,6 +155,18 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.3** — sleep timer for the sleep light: selectable duration (off /
+  10 / 15 / 20 / 30 / 45 / 60 min), countdown in the ongoing notification,
+  20-second fade to black on expiry, any key during the fade cancels it, and
+  expiry lands in blackout whose restore level is the sleep level. Timer is
+  cleared on ambient exit, turn-off and restart. New `SET_SLEEP_TIMER` ADB
+  action.
+- **v1.2** — ambient/sleep-light mode (warm dim + fourth key mapping), "turn
+  dimmer off" row and notification action, TV power link (CEC + wake-activity
+  fallback), blackout/ambient fail-safes, trimmed accessibility config
+  (key filtering only), notification permission request, settings screen
+  fixes (status lines no longer disappear during blackout; accessibility state
+  detected from both component-name forms).
 - **v1.1** — rename only: visible name TV Dimmer → LeoDimmer (see note at
   the top). No behaviour change; package, prefs, and signing key unchanged.
 - **v1.0** — first build. `minSdk 28` on purpose: the Xiaomi Mi Box in use
@@ -114,12 +182,23 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 - `app/src/main/java/com/universal/tvdimmer/KeyListeningDialog.kt` — raw
   key capture dialog.
 - `app/src/main/java/com/universal/tvdimmer/DimmerService.kt` — foreground
-  overlay service + ADB intent handling + anti-flicker overlay.
+  overlay service, ambient/blackout state machine, sleep timer (countdown +
+  fade-out), ADB intent handling, anti-flicker overlay, fail-safes.
 - `app/src/main/java/com/universal/tvdimmer/DimmerAccessibilityService.kt` —
   global key interception.
 - `app/src/main/java/com/universal/tvdimmer/DimmerPrefs.kt` — shared
-  `tv_dimmer_prefs` helpers (raw keycodes, brightness, blackout restore).
-- `app/src/main/java/com/universal/tvdimmer/BootReceiver.kt` — reboot restart.
+  `tv_dimmer_prefs` helpers (raw keycodes, brightness, ambient, sleep-timer
+  duration and end time, blackout restore, TV power flags).
+- `app/src/main/java/com/universal/tvdimmer/AccessibilityState.kt` — robust
+  "is the accessibility service enabled" check.
+- `app/src/main/java/com/universal/tvdimmer/TvPowerLink.kt` — best-effort
+  HDMI-CEC wake/standby + the wake-activity fallback.
+- `app/src/main/java/com/universal/tvdimmer/TvPowerReceiver.kt` — screen
+  on/off and shutdown triggers for the power link.
+- `app/src/main/java/com/universal/tvdimmer/WakeActivity.kt` — invisible
+  one-shot activity used only by the power link.
+- `app/src/main/java/com/universal/tvdimmer/BootReceiver.kt` — reboot restart
+  and "box powered on" trigger.
 - `app/src/main/AndroidManifest.xml`, `app/src/main/res/layout/dialog_key_listening.xml`,
   `app/src/main/res/layout/view_dimmer_overlay.xml`,
   `app/src/main/res/xml/dimmer_accessibility_config.xml`.
