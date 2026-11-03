@@ -5,12 +5,12 @@
 # the canonical Android Studio build -- this script produces the same
 # debug APK from the same sources, including the Leanback library resources.
 # Usage: ./build-manual-apk.sh [output-apk]
-# Default output: /tmp/tvdimmer-build/LeoDimmer-v1.4.apk
+# Default output: /tmp/tvdimmer-build/LeoDimmer-v1.5.apk
 # The debug keystore lives OUTSIDE the repo at
 # ~/workspace/.keystores/tvdimmer-debug.keystore (never committed).
 set -e
 cd "$(dirname "$0")"
-OUT_APK="${1:-/tmp/tvdimmer-build/LeoDimmer-v1.4.apk}"
+OUT_APK="${1:-/tmp/tvdimmer-build/LeoDimmer-v1.5.apk}"
 # Version from app/build.gradle.kts, read here (before any cd) so the
 # aapt2 link step below uses the Gradle version, not a stale hardcode.
 VC=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)

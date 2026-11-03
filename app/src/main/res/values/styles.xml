@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The settings screen is a Leanback GuidedStep. GuidedStepFragment
+    requires Theme_Leanback_GuidedStep (or a theme derived from it) for
+    its stylists to inflate: with the app's plain Material theme it
+    crashes on launch. This theme exists for exactly that host activity;
+    the rest of the app keeps the application theme.
+-->
+<resources>
+    <style name="LeoDimmerGuidedStep" parent="Theme.Leanback.GuidedStep" />
+</resources>

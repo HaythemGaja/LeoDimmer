@@ -157,6 +157,13 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.5** — launch-crash fix: the settings screen is a Leanback
+  GuidedStep, which requires `Theme_Leanback_GuidedStep` (or a derived
+  theme) for its stylists to inflate; the host activity was using the
+  app's plain Material theme, so the app crashed immediately on first
+  open on the Mi Box. MainActivity now uses a new
+  `LeoDimmerGuidedStep` theme derived from `Theme.Leanback.GuidedStep`;
+  no behaviour change otherwise.
 - **v1.4** — merge of the parallel local v1.2 feature set into v1.3, with
   no change to v1.3's sleep light, sleep timer, turn-off, or TV power link:
   night schedule (dim at 20–0, restore at 6–9, dim to 10/20/30/50%, applied
