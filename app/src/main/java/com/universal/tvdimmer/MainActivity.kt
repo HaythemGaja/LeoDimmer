@@ -33,6 +33,7 @@ class MainActivity : FragmentActivity() {
 
     companion object {
         private const val REQUEST_NOTIFICATIONS = 1
+        private var crashLoggerInstalled = false
     }
 
     private var lastOverlayGranted: Boolean? = null
@@ -40,6 +41,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashLogger()
         setContentView(R.layout.activity_main)
         lastOverlayGranted = Settings.canDrawOverlays(this)
         lastAccessibilityEnabled = AccessibilityState.isEnabled(this)
@@ -84,6 +86,43 @@ class MainActivity : FragmentActivity() {
     }
 
     fun isAccessibilityEnabled(): Boolean = AccessibilityState.isEnabled(this)
+
+    /**
+     * No ADB on the Mi Box, so a crash log the user can read is the only
+     * evidence. Write any uncaught exception to crash.log (private app
+     * storage, never sent anywhere), then let the normal crash proceed
+     * so the user still sees "keeps stopping". The settings screen shows
+     * the first line of that file on the next open.
+     * The logger itself must never crash the app: every step is guarded.
+     */
+    private fun installCrashLogger() {
+        try {
+            if (crashLoggerInstalled) return
+            crashLoggerInstalled = true
+            val previous = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                try {
+                    val writer = java.io.StringWriter()
+                    throwable.printStackTrace(java.io.PrintWriter(writer))
+                    openFileOutput("crash.log", MODE_PRIVATE).use {
+                        it.write(writer.toString().toByteArray(Charsets.UTF_8))
+                    }
+                } catch (_: Exception) {
+                    // Logging must not mask the original crash.
+                }
+                previous?.uncaughtException(thread, throwable)
+            }
+        } catch (_: Exception) {
+            // No logger is better than a logger that crashes startup.
+        }
+    }
+
+    fun lastCrashLine(): String? = try {
+        val text = openFileInput("crash.log").bufferedReader().readText()
+        text.lineSequence().firstOrNull { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }
 
     fun startDimmerService(action: String?, value: Int?) {
         val intent = Intent(this, DimmerService::class.java).apply {
@@ -177,6 +216,7 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         }
         // Each line is built separately: concatenating an if-expression with +
         // used to bind the whole tail to one branch and drop the status lines.
+        val crash = host?.lastCrashLine()
         val description = buildString {
             append("Brightness $brightness% — $state\n")
             append(schedule)
@@ -184,6 +224,9 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
             append("Smooth fade: ${if (DimmerPrefs.isFadeEnabled(ctx)) "on" else "off"}\n")
             append("Overlay permission: $overlay\n")
             append("Accessibility service: $accessibility\n")
+            if (crash != null) {
+                append("Last crash on this box: $crash\n")
+            }
             append("Map remote buttons below. Until you do, no key is intercepted.")
         }
         return GuidanceStylist.Guidance(
@@ -196,6 +239,16 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
 
     override fun onCreateActions(actions: MutableList<GuidedAction>, savedInstanceState: Bundle?) {
         val ctx = requireContext()
+        // A sleep light or blackout entered without the accessibility
+        // service has no remote-button restore path (blackout auto-restores
+        // in 1 min; the sleep light does not). Warn, don't block: the user
+        // can still turn it off from this screen or the notification.
+        val accessibilityMissing = !AccessibilityState.isEnabled(ctx)
+        val restoreWarning = if (accessibilityMissing) {
+            " — Accessibility is MISSING, so no remote button can turn it off; use this screen or the notification's Turn off action"
+        } else {
+            ""
+        }
         fun action(id: Long, title: String, description: String) =
             GuidedAction.Builder(ctx).id(id).title(title).description(description).build()
 
@@ -229,7 +282,7 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         actions += action(ID_TEST_TOGGLE, "Test: toggle blackout", "Switch blackout on / off now")
         actions += action(
             ID_TEST_AMBIENT, "Test: sleep light",
-            "Dim light for falling asleep — toggle on / off now"
+            "Dim light for falling asleep — toggle on / off now$restoreWarning"
         )
         actions += action(
             ID_AMBIENT_LEVEL, "Sleep light level",
@@ -242,7 +295,10 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         actions += action(ID_PRESET_75, "Preset: 75% brightness", "Jump straight to 75%")
         actions += action(ID_PRESET_50, "Preset: 50% brightness", "Jump straight to 50%")
         actions += action(ID_PRESET_25, "Preset: 25% brightness", "Jump straight to 25%")
-        actions += action(ID_PRESET_BLACKOUT, "Preset: blackout", "Jump straight to blackout")
+        actions += action(
+            ID_PRESET_BLACKOUT, "Preset: blackout",
+            "Jump straight to blackout$restoreWarning"
+        )
         actions += action(
             ID_AMBIENT_COLOR, "Sleep light colour",
             "${DimmerPrefs.ambientColorName(ctx)} — select for next colour"
@@ -458,10 +514,14 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
     private fun showKeyDialog(actionLabel: String, prefsKey: String) {
         val ctx = requireContext()
         val activity = host ?: return
-        KeyListeningDialog(ctx, actionLabel) { keyCode ->
+        DimmerPrefs.setCapturingKey(ctx, true)
+        val dialog = KeyListeningDialog(ctx, actionLabel) { keyCode ->
+            DimmerPrefs.setCapturingKey(ctx, false)
             DimmerPrefs.setKey(ctx, prefsKey, keyCode)
             // Rebuild the GuidedStep so the new keycode shows in the row.
             activity.recreate()
-        }.show()
+        }
+        dialog.setOnDismissListener { DimmerPrefs.setCapturingKey(ctx, false) }
+        dialog.show()
     }
 }

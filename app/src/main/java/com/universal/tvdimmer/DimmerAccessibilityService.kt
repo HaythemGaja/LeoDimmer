@@ -86,6 +86,11 @@ class DimmerAccessibilityService : AccessibilityService() {
             startDimmerService(DimmerService.ACTION_RESET_IDLE, null)
         }
 
+        // While the key-capture dialog is open, do not swallow the button
+        // being mapped: return false so it reaches the dialog window.
+        // The idle reset above is harmless and stays.
+        if (DimmerPrefs.isCapturingKey(this)) return false
+
         val canDraw = Settings.canDrawOverlays(this)
 
         // Rule 1: any remote button exits blackout instantly.

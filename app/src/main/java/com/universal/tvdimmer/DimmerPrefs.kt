@@ -60,6 +60,16 @@ object DimmerPrefs {
     const val KEY_IDLE_MINUTES = "idle_minutes"
     const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
     const val KEY_FADE_ENABLED = "fade_enabled"
+    // While the key-capture dialog is open, the accessibility service
+    // must not swallow the button being mapped (see KeyListeningDialog).
+    const val KEY_CAPTURING = "capturing_key"
+
+    fun isCapturingKey(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_CAPTURING, false)
+
+    fun setCapturingKey(context: Context, capturing: Boolean) {
+        prefs(context).edit().putBoolean(KEY_CAPTURING, capturing).apply()
+    }
 
     /** Sleep-light colours. Warm brown first = the v1.3 default, unchanged. */
     val AMBIENT_COLORS = listOf(

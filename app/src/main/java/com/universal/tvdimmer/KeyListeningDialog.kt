@@ -28,6 +28,26 @@ class KeyListeningDialog(
         window?.setBackgroundDrawableResource(android.R.color.transparent)
         findViewById<TextView>(R.id.txt_dialog_subtitle).text =
             "Press the physical remote button you want to use for:\n\"$actionLabel\""
+        // The dialog content has no focusable view, and on a TV the
+        // GuidedStep grid underneath can keep focus and swallow D-pad
+        // keys before Dialog.onKeyDown ever runs. Give the decor view
+        // focus so keys have a target, and capture in dispatchKeyEvent
+        // below, which runs before view-focus dispatch regardless.
+        window?.decorView?.isFocusableInTouchMode = true
+        window?.decorView?.requestFocus()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                dismiss()
+                return true
+            }
+            onKeyCaptured(event.keyCode)
+            dismiss()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {

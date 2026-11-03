@@ -157,6 +157,22 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.6** — key capture + preset-crash hardening (no single definite
+  crash was found in the preset handlers, so every unguarded first-start
+  path was fixed and a crash log was added): key-capture dialog now
+  captures in `dispatchKeyEvent` and requests decor focus, and the
+  accessibility service steps aside while a capture is in progress
+  (a `capturing_key` flag), so an already-mapped button cannot be eaten
+  before the dialog sees it; the service foregrounds immediately in
+  `onCreate` (no more 5-second deadline risk on a slow box), the
+  notification action now has a real icon instead of null, and
+  `ensureOverlay` catches any `RuntimeException` instead of dying on
+  a vendor addView failure. Sleep-light / blackout rows now warn when
+  accessibility is missing (no remote-button restore path). New local
+  crash logger: any uncaught exception is written to the app's private
+  `crash.log` and its first line is shown on the settings screen at
+  the next open, so a crash on a box with no ADB can still be reported
+  exactly.
 - **v1.5** — launch-crash fix: the settings screen is a Leanback
   GuidedStep, which requires `Theme_Leanback_GuidedStep` (or a derived
   theme) for its stylists to inflate; the host activity was using the

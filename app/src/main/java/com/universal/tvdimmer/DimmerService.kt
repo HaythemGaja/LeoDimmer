@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -153,6 +154,13 @@ class DimmerService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Foreground immediately: the 5-second startForegroundService
+        // deadline runs from the caller's start call, not from the end
+        // of onStartCommand, and a slow box recreating the settings
+        // screen on the same main thread can otherwise miss it and
+        // look exactly like an app crash on the click that started it.
+        // onStartCommand still refreshes the notification at its end.
+        startAsForeground()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         lastActivityMs = System.currentTimeMillis()
         // Fail-safe first: never come back up black or tinted.
@@ -318,12 +326,11 @@ class DimmerService : Service() {
             }
             windowManager?.addView(osd, osdParams)
             osdView = osd
-        } catch (_: SecurityException) {
-            // Overlay permission was revoked between the check and the add.
-            overlayView = null
-            tintView = null
-            osdView = null
-        } catch (_: WindowManager.BadTokenException) {
+        } catch (_: RuntimeException) {
+            // Overlay permission revoked between check and add, or a
+            // vendor-specific addView failure (BadToken, IllegalArgument,
+            // InvalidDisplay, ...). Stay alive without an overlay rather
+            // than killing the whole app process on a service start.
             overlayView = null
             tintView = null
             osdView = null
@@ -757,7 +764,12 @@ class DimmerService : Service() {
             .setContentText(text)
             .setContentIntent(pending)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Turn off", turnOff).build())
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_dialog_info),
+                    "Turn off", turnOff
+                ).build()
+            )
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
