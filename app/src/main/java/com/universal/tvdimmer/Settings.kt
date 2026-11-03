@@ -2,6 +2,7 @@ package com.universal.tvdimmer
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.view.KeyEvent
 
 /**
@@ -12,7 +13,8 @@ import android.view.KeyEvent
  *
  *   Day   -> bright picture
  *   Night -> the picture dimmed
- *   Sleep -> a warm sleep light that fades itself out
+ *   Sleep -> the lamp: one opaque colour, dimmed by scaling the colour itself,
+ *            which fades out when the sleep timer runs out
  *
  * Each state keeps its own value, so switching modes never means re-tuning:
  * Day and Night have their own brightness, Sleep has its own glow, colour and
@@ -85,21 +87,29 @@ object Settings {
     /** Night: dark room, dimmer than Day but never fully dark. */
     val NIGHT_BRIGHTNESS_OPTIONS = listOf(10, 15, 20, 25, 30, 40, 50)
 
-    /** Sleep light: dim enough to sleep by, bright enough to see by. */
+    /**
+     * Lamp level. The lamp is drawn opaque, so the top of the range is a real
+     * full-brightness panel rather than a wash over the picture.
+     */
     const val AMBIENT_MIN = 5
-    const val AMBIENT_MAX = 60
+    const val AMBIENT_MAX = 100
     const val AMBIENT_STEP = 5
     const val DEFAULT_AMBIENT_LEVEL = 20
 
+    /**
+     * Lamp colours, not washes. Each one is drawn opaque at full panel
+     * brightness and dimmed by scaling its own channels (see [ambientLampColor]),
+     * so the light on the wall is this colour and nothing from the picture.
+     */
     val AMBIENT_COLORS = listOf(
-        "Warm brown" to 0xFF2A1200.toInt(),
-        "Red" to 0xFFFF0000.toInt(),
-        "Amber" to 0xFFFFAA00.toInt(),
-        "Orange" to 0xFFFF6600.toInt(),
-        "Green" to 0xFF00C853.toInt(),
-        "Blue" to 0xFF0066FF.toInt(),
-        "Violet" to 0xFFAA00FF.toInt(),
-        "Pink" to 0xFFFF4081.toInt()
+        "Warm white" to 0xFFFFB46B.toInt(),
+        "Candle" to 0xFFFF8A3D.toInt(),
+        "Amber" to 0xFFFFA000.toInt(),
+        "Sunset" to 0xFFFF6A3D.toInt(),
+        "Rose" to 0xFFFF5470.toInt(),
+        "Violet" to 0xFF9B6BFF.toInt(),
+        "Ice" to 0xFFCFE3FF.toInt(),
+        "Moonlight" to 0xFF6F9BFF.toInt()
     )
 
     /** 0 = stay on until you turn it off. */
@@ -204,6 +214,23 @@ object Settings {
 
     fun ambientColorValue(context: Context): Int =
         AMBIENT_COLORS[getAmbientColorIndex(context)].second
+
+    /** The lamp fill: the chosen colour scaled by the level, drawn fully opaque. */
+    fun ambientLampColor(context: Context): Int =
+        scaleColor(ambientColorValue(context), getAmbientLevel(context))
+
+    /**
+     * Dim a colour by scaling its channels. A lamp dims this way; fading a black
+     * layer instead would only hide the picture behind it.
+     */
+    fun scaleColor(color: Int, percent: Int): Int {
+        val factor = percent.coerceIn(0, 100) / 100f
+        return Color.rgb(
+            (Color.red(color) * factor).toInt(),
+            (Color.green(color) * factor).toInt(),
+            (Color.blue(color) * factor).toInt()
+        )
+    }
 
     // ---- Sleep timer ----
 

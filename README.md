@@ -1,4 +1,4 @@
-# LeoDimmer 2.1
+# LeoDimmer 2.2
 
 A dimmer for Android TV, built for the Xiaomi Mi Box 4 (Android 9 / API 28).
 It dims the picture over any app, and it is designed around one constraint:
@@ -12,7 +12,7 @@ Pure Kotlin. No external dependencies.
 |---|---|---|
 | **Day** | full picture | Day brightness (100 / 90 / 80 / 70%) |
 | **Night** | the picture dimmed | Night brightness (10 … 50%) |
-| **Sleep** | a warm sleep light that fades itself out | glow, colour, auto-off timer |
+| **Sleep** | an opaque lamp in one colour, which fades itself out | level (5 … 100%), colour, auto-off timer |
 
 You map **one** remote button — the **Mode key** — and press it:
 
@@ -47,6 +47,32 @@ dimmer that silently does nothing is worse than one that says why.
 A 1080 panel cannot hold the whole sheet, so while there is content below the
 bottom edge a **▼ more below** marker sits in the corner. `▼` scrolls to it;
 the focused row is always scrolled into view.
+
+## The Sleep lamp
+
+Sleep does not dim the picture — it *is* the light. The whole screen is filled
+with one opaque colour, and the level dims that colour's own value instead of
+fading a black layer over whatever happens to be on screen:
+
+| | Day / Night | Sleep |
+|---|---|---|
+| fill | black, alpha = 100 − brightness | the lamp colour, fully opaque |
+| level means | how dim the picture is | how bright the light is |
+| what the panel emits | the app's picture, dimmed | the lamp colour, and nothing else |
+
+That difference matters. At the old default (level 20) a translucent layer left
+80% of the *paused video* visible, so the "light" was a tinted picture and a
+bright app could out-shine the lamp. An opaque fill has no picture in it, reaches
+real panel brightness, and can be a true warm white instead of a dark wash. The
+colours are warm white, candle, amber, sunset, rose, violet, ice and moonlight.
+
+Two honest limits. The panel's LED backlight is what makes the light, but it is
+not addressable — no zones, no Ambilight — and the box cannot touch it at all:
+HDMI carries no brightness command, so the TV's own backlight setting stays the
+ceiling and "intensity" here means the pixel value. And a static full-screen
+colour for hours is the classic OLED wear pattern; on an LCD panel it is
+harmless, but if this box ever drives an OLED, keep the level modest or let the
+sleep timer end it.
 
 ## Turning the TV off and on
 
@@ -125,8 +151,8 @@ the system before any app sees them.
   the key service is off, so the screen can never get stuck black.
 - **A restart never resumes into blackout or Sleep.** The dimmer always comes
   back to a visible picture.
-- **The sleep timer** fades the light to black over 20 seconds when it runs out,
-  then leaves a dim picture for your next wake-up press.
+- **The sleep timer** dims the lamp out over 20 seconds when it runs out, then
+  leaves a dim picture for your next wake-up press.
 - **Night schedule** (optional) dims to the Night level at a chosen hour and
   restores the previous level in the morning.
 - **Auto-dim when idle** (optional) blacks out after a chosen period without a
@@ -192,3 +218,7 @@ Leanback GuidedStep. Its three failures all came from that stack:
 `OverlayService`, `KeyService`, `Settings` and `MainActivity` are new; the
 overlay mechanics (a single always-attached view whose alpha is the brightness)
 are the part that already worked and are carried over.
+
+In 2.2 that alpha became the *picture* dimmer only: Sleep fills the same view
+opaquely with the lamp colour, so the lamp is light rather than a tint over the
+picture.

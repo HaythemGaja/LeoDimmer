@@ -36,8 +36,9 @@ import java.util.Calendar
  *
  *   Day   -> brightness = Day brightness, sleep light off, timer off
  *   Night -> brightness = Night brightness, sleep light off, timer off
- *   Sleep -> the sleep light: its colour at its own level, plus the sleep
- *            timer, which fades the light to black when it runs out
+ *   Sleep -> the lamp: an opaque fill of its colour, dimmed by scaling that
+ *            colour rather than by fading a black layer, plus the sleep timer,
+ *            which fades the light out when it runs out
  *
  * Fail-safes (unchanged from 1.x, because they are the reason a dimmer is
  * safe to leave running):
@@ -96,6 +97,9 @@ class OverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var overlay: View? = null
+
+    /** What the overlay is currently filled with (see [applyTint]). */
+    private var fillColor = Color.BLACK
     private var osd: TextView? = null
     private var tvPowerReceiver: BroadcastReceiver? = null
 
@@ -129,9 +133,14 @@ class OverlayService : Service() {
     }
 
     private var sleepFadeStep = -1
-    private var fadeFromAlpha = 0f
+
+    /** The lamp colour the fade-out started from. */
+    private var fadeFromColor = Color.BLACK
+
     private var generalFadeFromAlpha = 0f
     private var generalFadeTargetAlpha = 0f
+    private var generalFadeFromColor = Color.BLACK
+    private var generalFadeToColor = Color.BLACK
     private var generalFadeStep = -1
     private var generalFadeShowOsd = true
     private var lastActivityMs = 0L
@@ -239,7 +248,11 @@ class OverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             ).apply { gravity = Gravity.TOP or Gravity.START }
-            dim.alpha = Settings.opacityFor(Settings.getBrightness(this))
+            dim.alpha = if (Settings.isAmbient(this)) {
+                1f
+            } else {
+                Settings.opacityFor(Settings.getBrightness(this))
+            }
             windowManager?.addView(dim, params)
             overlay = dim
             applyTint()
@@ -276,10 +289,18 @@ class OverlayService : Service() {
         }
     }
 
+    /**
+     * What the overlay is filled with. Day and Night paint black over the
+     * picture; Sleep paints the lamp colour and lets the colour's own value do
+     * the dimming, so the panel emits light instead of filtering it.
+     */
     private fun applyTint() {
-        overlay?.setBackgroundColor(
-            if (Settings.isAmbient(this)) Settings.ambientColorValue(this) else Color.BLACK
-        )
+        fillColor = if (Settings.isAmbient(this)) {
+            Settings.ambientLampColor(this)
+        } else {
+            Color.BLACK
+        }
+        overlay?.setBackgroundColor(fillColor)
     }
 
     private fun showOsd(message: String) {
@@ -363,25 +384,42 @@ class OverlayService : Service() {
         generalFadeStep = -1
         val clamped = percent.coerceIn(0, 100)
         val previous = Settings.getBrightness(this)
+        val lamp = Settings.isAmbient(this)
         val oldAlpha = overlay?.alpha ?: Settings.opacityFor(previous)
-        if (previous > 0 && clamped == 0) Settings.setPreBlackout(this, previous)
+        val oldFill = fillColor
+        if (previous > 0 && clamped == 0 && !lamp) Settings.setPreBlackout(this, previous)
         Settings.setBrightness(this, clamped)
         cancelSleepFade()
         applyTint()
         updateBlackoutGuard(clamped)
-        val targetAlpha = Settings.opacityFor(clamped)
-        if (animate && Settings.isFadeEnabled(this) && sleepFadeStep < 0 && oldAlpha != targetAlpha) {
+        // The lamp is opaque: its level changes the colour, never the layer.
+        val targetAlpha = if (lamp) 1f else Settings.opacityFor(clamped)
+        val targetFill = fillColor
+        if (animate && Settings.isFadeEnabled(this) && sleepFadeStep < 0 &&
+            (oldAlpha != targetAlpha || oldFill != targetFill)
+        ) {
             generalFadeFromAlpha = oldAlpha
             generalFadeTargetAlpha = targetAlpha
+            generalFadeFromColor = oldFill
+            generalFadeToColor = targetFill
             generalFadeStep = 0
             generalFadeShowOsd = showOsd
             overlay?.alpha = oldAlpha
+            overlay?.setBackgroundColor(oldFill)
             handler.post(generalFade)
             return
         }
         overlay?.alpha = targetAlpha
+        overlay?.setBackgroundColor(targetFill)
         if (showOsd) showBrightnessOsd()
     }
+
+    /** Blend two fills, so an alpha fade and a colour fade use one animate. */
+    private fun mixColor(from: Int, to: Int, fraction: Float): Int = Color.rgb(
+        (Color.red(from) + (Color.red(to) - Color.red(from)) * fraction).toInt(),
+        (Color.green(from) + (Color.green(to) - Color.green(from)) * fraction).toInt(),
+        (Color.blue(from) + (Color.blue(to) - Color.blue(from)) * fraction).toInt()
+    )
 
     private fun onGeneralFadeStep() {
         generalFadeStep += 1
@@ -389,12 +427,16 @@ class OverlayService : Service() {
         if (view == null || generalFadeStep >= 6) {
             generalFadeStep = -1
             view?.alpha = generalFadeTargetAlpha
+            view?.setBackgroundColor(generalFadeToColor)
             if (generalFadeShowOsd) showBrightnessOsd()
             return
         }
         val fraction = generalFadeStep.toFloat() / 6f
         view.alpha = generalFadeFromAlpha +
             (generalFadeTargetAlpha - generalFadeFromAlpha) * fraction
+        view.setBackgroundColor(
+            mixColor(generalFadeFromColor, generalFadeToColor, fraction)
+        )
         handler.postDelayed(generalFade, 50)
     }
 
@@ -483,9 +525,9 @@ class OverlayService : Service() {
             startAsForeground()
             return
         }
-        // Fade to black, not to solid warm: the light goes out.
-        view.setBackgroundColor(Color.BLACK)
-        fadeFromAlpha = view.alpha
+        // The lamp dims itself out: the fill loses its light, nothing else moves.
+        view.alpha = 1f
+        fadeFromColor = Settings.ambientLampColor(this)
         sleepFadeStep = 0
         handler.post(sleepFade)
     }
@@ -498,7 +540,9 @@ class OverlayService : Service() {
             finishSleep()
             return
         }
-        view.alpha = fadeFromAlpha + (1f - fadeFromAlpha) * fraction
+        view.setBackgroundColor(
+            Settings.scaleColor(fadeFromColor, ((1f - fraction) * 100f).toInt())
+        )
         handler.postDelayed(sleepFade, SLEEP_FADE_STEP_MILLIS)
     }
 
@@ -506,8 +550,12 @@ class OverlayService : Service() {
         if (sleepFadeStep < 0) return
         handler.removeCallbacks(sleepFade)
         sleepFadeStep = -1
-        overlay?.alpha = Settings.opacityFor(Settings.getBrightness(this))
         applyTint()
+        overlay?.alpha = if (Settings.isAmbient(this)) {
+            1f
+        } else {
+            Settings.opacityFor(Settings.getBrightness(this))
+        }
     }
 
     /** The timer ran out: sleep light off, blackout, dim picture on wake. */
