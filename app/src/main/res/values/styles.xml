@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    The settings screen is a Leanback GuidedStep. GuidedStepFragment
-    requires Theme_Leanback_GuidedStep (or a theme derived from it) for
-    its stylists to inflate: with the app's plain Material theme it
-    crashes on launch. This theme exists for exactly that host activity;
-    the rest of the app keeps the application theme.
+    v2.0 has no Leanback and no fragments, so there is no GuidedStep theme to
+    get wrong: the old launch crash was a GuidedStep inflating under a plain
+    Material theme. This is a dark, plain activity theme sized for a TV.
 -->
 <resources>
-    <style name="LeoDimmerGuidedStep" parent="Theme.Leanback.GuidedStep" />
+    <style name="LeoDimmer" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0B0B0D</item>
+        <item name="android:colorBackground">#FF0B0B0D</item>
+        <item name="android:textColor">#FFEDEDED</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>

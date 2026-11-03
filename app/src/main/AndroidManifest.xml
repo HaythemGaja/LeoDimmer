@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Draw the dimmer overlay above every app. Granted in Settings, not at install. -->
+    <!-- Draw the dimmer above every app. Granted in Settings, not at install. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- Global remote-key interception. Granted by enabling the service in Accessibility settings. -->
+    <!-- Global remote-key interception; enabled by the user in Accessibility. -->
     <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -12,13 +12,11 @@
 
     <!--
         TV power link. HDMI_CEC is signature|privileged, so a sideloaded app is
-        never actually granted it: TvPowerLink calls the CEC API reflectively
-        and falls back to a brief HDMI activity. Declared so the intent is
-        visible (and so the app can use CEC if it is ever installed privileged).
+        never granted it: TvPowerLink calls the CEC API reflectively and falls
+        back to a brief HDMI activity. Declared so the intent is visible.
     -->
     <uses-permission android:name="android.permission.HDMI_CEC" />
 
-    <!-- Android TV: a touchscreen is not required; Leanback launcher is the target. -->
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
@@ -30,13 +28,14 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/LeoDimmer">
 
+        <!-- The whole UI. One activity, one screen: no fragments, no dialogs. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="landscape"
-            android:theme="@style/LeoDimmerGuidedStep">
+            android:theme="@style/LeoDimmer">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
@@ -44,11 +43,7 @@
             </intent-filter>
         </activity>
 
-        <!--
-            TV power link helper: invisible, non-interactive, finishes itself.
-            Launched only when HDMI-CEC one-touch-play is unavailable, to make
-            the box drive HDMI output and wake a CEC-enabled TV.
-        -->
+        <!-- Invisible, self-finishing helper for the TV power link. -->
         <activity
             android:name=".WakeActivity"
             android:excludeFromRecents="true"
@@ -58,13 +53,12 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!--
-            Headless ADB control. Exported on purpose: `adb shell am startservice`
-            runs outside the app, so a non-exported service would reject it.
-            This is a local-device control surface for the owner's own box, not
-            a network service: it only changes this app's overlay opacity.
+            The overlay. Exported on purpose: `adb shell am startservice` runs
+            outside the app, and this is a local control surface for the owner's
+            own box (it only changes this app's overlay opacity).
         -->
         <service
-            android:name=".DimmerService"
+            android:name=".OverlayService"
             android:exported="true"
             android:foregroundServiceType="specialUse">
             <property
@@ -73,12 +67,12 @@
         </service>
 
         <!--
-            Global key interception. The BIND_ACCESSIBILITY_SERVICE permission
-            is signature-level: only the system can bind to it, even though the
-            service is exported (the system binding requires this permission).
+            Remote-key filter and key learning. BIND_ACCESSIBILITY_SERVICE is
+            signature-level, so only the system can bind to it. The service
+            reads no screen content, text or notifications.
         -->
         <service
-            android:name=".DimmerAccessibilityService"
+            android:name=".KeyService"
             android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -89,9 +83,7 @@
                 android:resource="@xml/dimmer_accessibility_config" />
         </service>
 
-        <!-- Persistent lifecycle: restart the overlay after a reboot, but only
-             if the user had previously started it (service_enabled in prefs).
-             Also the "box powered on" trigger for the TV power link. -->
+        <!-- Restarts the overlay after a reboot, only if it was in use. -->
         <receiver
             android:name=".BootReceiver"
             android:exported="false">
@@ -99,6 +91,5 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
-
     </application>
 </manifest>

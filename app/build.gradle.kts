@@ -17,8 +17,8 @@ android {
         // Raise this to 30 in one line if you ever want a strict 11+ build.
         minSdk = 28
         targetSdk = 34
-        versionCode = 10
-        versionName = "1.9"
+        versionCode = 11
+        versionName = "2.0"
     }
 
     buildTypes {
@@ -37,8 +37,8 @@ android {
 }
 
 dependencies {
-    // Leanback settings screen (GuidedStepSupportFragment). This is the only
-    // external dependency, on purpose: the S905X in the Mi Box does not need
-    // a heavy dependency graph for a dimmer.
-    implementation("androidx.leanback:leanback:1.0.0")
+    // v2.0 has none. The Leanback GuidedStep screen was the source of the
+    // launch crash (its stylists inflate under a theme it cannot live with)
+    // and of the settings/dialog focus problems; the screen is now plain
+    // Android views with D-pad focus, which needs no library at all.
 }

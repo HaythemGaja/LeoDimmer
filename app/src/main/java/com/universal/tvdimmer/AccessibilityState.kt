@@ -21,7 +21,7 @@ import android.view.accessibility.AccessibilityManager
 object AccessibilityState {
 
     fun componentName(context: Context): ComponentName =
-        ComponentName(context, DimmerAccessibilityService::class.java)
+        ComponentName(context, KeyService::class.java)
 
     fun isEnabled(context: Context): Boolean {
         val expected = componentName(context)

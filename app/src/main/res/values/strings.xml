@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LeoDimmer</string>
-    <string name="accessibility_service_description">LeoDimmer watches for the remote buttons you mapped in its settings, so it can dim the screen or switch to blackout audio-only mode from any app. It intercepts only those buttons you chose (and any button while blackout is active, to restore the picture). It does not read screen content, text, or notifications.</string>
+    <string name="accessibility_service_description">LeoDimmer needs this to see the one remote button you map, so it can switch between Day, Night and Sleep while you are watching something. It intercepts only the button you chose (and any button while the screen is blacked out, to bring the picture back), and it reads no screen content, text or notifications.</string>
 </resources>

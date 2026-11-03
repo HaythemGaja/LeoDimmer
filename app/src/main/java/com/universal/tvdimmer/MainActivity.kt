@@ -1,725 +1,577 @@
 package com.universal.tvdimmer
 
-import android.Manifest
-import android.app.AlertDialog
+import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
+import android.os.Handler
+import android.os.Looper
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.KeyEvent
-import androidx.fragment.app.FragmentActivity
-import androidx.leanback.app.GuidedStepSupportFragment
-import androidx.leanback.widget.GuidanceStylist
-import androidx.leanback.widget.GuidedAction
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
 
 /**
- * Leanback settings screen + onboarding.
+ * LeoDimmer v2.0 -- one screen, built for a D-pad.
  *
- * The settings UI is a GuidedStep (the native Android TV settings pattern:
- * full-screen, D-pad navigable, 10-foot type). On first run all mappings are
- * unset and both permissions are shown as missing until granted.
+ * No fragments, no dialogs, no Leanback. Every previous failure came from that
+ * stack: the GuidedStep theme crash, a dialog that never took focus so button
+ * presses were never seen, and a long list of rows where one wrong tap looked
+ * like a crash. Here the screen is plain views:
  *
- * Onboarding: on first open the app asks for the permissions it needs,
- * one at a time, overlay first then accessibility (see
- * promptForMissingPermissions). Android does not allow a simple
- * Allow/Deny popup for either of these: both must be granted on a system
- * settings page, so the prompt opens that page. The settings rows remain
- * as a manual grant path. When the user returns, onResume notices the
- * state changed and rebuilds the screen so the rows flip to "Granted"
- * without relaunching.
+ *   ▲ ▼  move between rows        ◀ ▶  change the value in place
+ *   OK   switch a mode / learn a key
  *
- * Note on the Mi Box: Xiaomi's overlay page is reached through the same
- * ACTION_MANAGE_OVERLAY_PERMISSION intent; there is no separate hidden page
- * to link to on stock Android TV, despite Xiaomi's extra app-info screens.
+ * Nothing lives behind a sub-screen, so there is nowhere for a press to get
+ * lost and nothing to dismiss.
+ *
+ * The CHECK block at the top is deliberate: if the overlay permission or the
+ * remote-keys service is missing, the row says so in red and OK takes you to
+ * the right system page. A dimmer that silently does nothing is worse than one
+ * that says why.
  */
-class MainActivity : FragmentActivity() {
+class MainActivity : Activity() {
 
-    companion object {
+    private companion object {
+        private val TEXT = 0xFFEDEDED.toInt()
+        private val MUTED = 0xFF9A9A9A.toInt()
+        private val ACCENT = 0xFFFFC857.toInt()
+        private val GOOD = 0xFF7BD88F.toInt()
+        private val BAD = 0xFFFF6B6B.toInt()
+        private val BG = 0xFF0B0B0D.toInt()
         private const val REQUEST_NOTIFICATIONS = 1
-        private var crashLoggerInstalled = false
     }
 
-    private var lastOverlayGranted: Boolean? = null
-    private var lastAccessibilityEnabled: Boolean? = null
-
-    /** Callback for the remote button being captured, if any (see startKeyCapture). */
-    private var keyCapture: ((keyCode: Int) -> Unit)? = null
-    private var keyDialog: KeyListeningDialog? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var column: LinearLayout
+    private var learnPoll: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        installCrashLogger()
-        // A capture cannot survive an activity. If the app was killed while the
-        // dialog was open, this flag stays set, and the accessibility service
-        // would then pass every mapped button straight through for ever.
-        DimmerPrefs.setCapturingKey(this, false)
-        setContentView(R.layout.activity_main)
-        lastOverlayGranted = Settings.canDrawOverlays(this)
-        lastAccessibilityEnabled = AccessibilityState.isEnabled(this)
-        if (lastOverlayGranted == true) {
-            requestNotificationPermissionIfNeeded()
-            startDimmerService(null, null)
-        }
-        if (savedInstanceState == null) {
-            supportFragmentManager.beginTransaction()
-                .replace(R.id.container, DimmerSettingsFragment())
-                .commit()
-        }
-        // Ask, don't just list rows: until v1.6 the app never prompted
-        // for either permission on first open, so a new user could try
-        // presets and key mapping with nothing granted and no idea why
-        // nothing worked. Overlay first; on return with overlay granted
-        // (which recreates this activity) the accessibility prompt follows.
-        // Dismissing with Later does not re-prompt in the same session:
-        // a new prompt only appears on a fresh activity creation.
-        // Posted, not shown directly, so the dialog attaches to a window
-        // that is already resumed (avoids a BadToken on some boxes).
-        window?.decorView?.post { promptForMissingPermissions() }
-    }
+        CrashLog.install(this)
+        window.setBackgroundDrawable(ColorDrawable(BG))
 
-    private fun promptForMissingPermissions() {
-        if (!Settings.canDrawOverlays(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("LeoDimmer needs overlay permission")
-                .setMessage(
-                    "LeoDimmer dims the screen with an overlay above " +
-                        "other apps. Without \"Display over other apps\" " +
-                        "it cannot dim anything. Open settings and allow " +
-                        "it for LeoDimmer."
-                )
-                .setPositiveButton("Open settings") { _, _ -> openOverlaySettings() }
-                .setNegativeButton("Later", null)
-                .setCancelable(true)
-                .show()
-            return
+        // The dimmer lives in a foreground service. On 13+ the notification
+        // needs a runtime grant; the service still runs without it.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATIONS
+            )
         }
-        if (!AccessibilityState.isEnabled(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("LeoDimmer needs the accessibility service")
-                .setMessage(
-                    "Global remote buttons only work through the " +
-                        "accessibility service. Open Accessibility " +
-                        "settings, find LeoDimmer, and turn it on. " +
-                        "Without it, dimming from this settings screen " +
-                        "still works, but remote buttons will not."
-                )
-                .setPositiveButton("Open settings") { _, _ -> openAccessibilitySettings() }
-                .setNegativeButton("Later", null)
-                .setCancelable(true)
-                .show()
+
+        val scroll = ScrollView(this).apply { isFillViewport = true }
+        column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG)
+            setPadding(dp(56), dp(36), dp(56), dp(56))
         }
+        scroll.addView(
+            column,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        setContentView(scroll)
     }
 
     override fun onResume() {
         super.onResume()
-        val overlayNow = Settings.canDrawOverlays(this)
-        val accessibilityNow = AccessibilityState.isEnabled(this)
-        if (lastOverlayGranted != null &&
-            (overlayNow != lastOverlayGranted || accessibilityNow != lastAccessibilityEnabled)
-        ) {
-            lastOverlayGranted = overlayNow
-            lastAccessibilityEnabled = accessibilityNow
-            recreate()
-        }
-    }
-
-    /**
-     * The foreground-service notification is how the user learns which mode is
-     * active; on Android 13+ it is hidden entirely until this is granted, so
-     * ask for it once the overlay permission is in place (i.e. once the user
-     * has actually committed to running the dimmer).
-     */
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
-    }
-
-    /**
-     * Capture the next remote button in the activity itself.
-     *
-     * v1.6 captured inside a focusable Dialog. That works on an emulator but
-     * not reliably on the Mi Box: when the dialog's window never takes focus
-     * (the GuidedStep underneath can keep it on vendor TV builds) the presses
-     * go to the activity instead, so no button was ever registered -- the
-     * reported "does not register the button when pressed". The dialog is now
-     * purely visual and not focusable, and the activity captures in
-     * dispatchKeyEvent, so there is exactly one place a key can arrive.
-     */
-    fun startKeyCapture(actionLabel: String, prefsKey: String) {
-        endKeyCapture()
-        DimmerPrefs.setCapturingKey(this, true)
-        keyCapture = { keyCode ->
-            DimmerPrefs.setKey(this, prefsKey, keyCode)
-            // Rebuild the GuidedStep so the new keycode shows in the row.
-            recreate()
-        }
-        keyDialog = KeyListeningDialog(this, actionLabel).also { dialog ->
-            dialog.setOnDismissListener { endKeyCapture() }
-            dialog.show()
-        }
-    }
-
-    fun endKeyCapture() {
-        keyCapture = null
-        DimmerPrefs.setCapturingKey(this, false)
-        // Cleared before dismiss(): the dismiss listener calls back in here.
-        val dialog = keyDialog
-        keyDialog = null
-        dialog?.dismiss()
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val capture = keyCapture ?: return super.dispatchKeyEvent(event)
-        if (event.action == KeyEvent.ACTION_UP) return true
-        if (event.action != KeyEvent.ACTION_DOWN) {
-            return super.dispatchKeyEvent(event)
-        }
-        val keyCode = event.keyCode
-        endKeyCapture()
-        // BACK cancels and is therefore never itself mappable.
-        if (keyCode != KeyEvent.KEYCODE_BACK) capture(keyCode)
-        return true
+        // Opening the app starts the dimmer, and re-syncs it with the settings.
+        OverlayService.send(this, null)
+        render()
     }
 
     override fun onDestroy() {
-        // Do not dismiss here: the window is already going away.
-        keyCapture = null
-        keyDialog = null
-        DimmerPrefs.setCapturingKey(this, false)
+        handler.removeCallbacksAndMessages(null)
+        learnPoll = null
         super.onDestroy()
     }
 
-    fun isAccessibilityEnabled(): Boolean = AccessibilityState.isEnabled(this)
+    // ---- Screen ----
 
-    /**
-     * No ADB on the Mi Box, so a crash log the user can read is the only
-     * evidence. Write any uncaught exception to crash.log (private app
-     * storage, never sent anywhere), then let the normal crash proceed
-     * so the user still sees "keeps stopping". The settings screen shows
-     * the first line of that file on the next open.
-     * The logger itself must never crash the app: every step is guarded.
-     */
-    private fun installCrashLogger() {
-        try {
-            if (crashLoggerInstalled) return
-            crashLoggerInstalled = true
-            val previous = Thread.getDefaultUncaughtExceptionHandler()
-            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-                try {
-                    val writer = java.io.StringWriter()
-                    throwable.printStackTrace(java.io.PrintWriter(writer))
-                    openFileOutput("crash.log", MODE_PRIVATE).use {
-                        it.write(writer.toString().toByteArray(Charsets.UTF_8))
-                    }
-                } catch (_: Exception) {
-                    // Logging must not mask the original crash.
+    private fun render() {
+        val focused = currentFocus?.tag as? String
+        column.removeAllViews()
+        addHeader()
+        addStatus()
+        addModes()
+        addTuning()
+        addAutomation()
+        addRemote()
+        addFooter()
+        val restore = focused?.let { column.findViewWithTag<View>(it) }
+            ?: column.findViewWithTag<View>("mode_${Settings.getMood(this)}")
+        column.post { restore?.requestFocus() }
+    }
+
+    private fun addHeader() {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "LeoDimmer"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
+            setTextColor(TEXT)
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        }
+        val pill = TextView(this).apply {
+            text = Settings.moodName(Settings.getMood(this@MainActivity)).uppercase()
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setTextColor(BG)
+            setBackgroundColor(ACCENT)
+            setPadding(dp(18), dp(7), dp(18), dp(7))
+        }
+        row.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(pill)
+        column.addView(row)
+        column.addView(info("One remote button: Day → Night → Sleep.", MUTED, 17f))
+        CrashLog.firstLine(this)?.let { column.addView(info("Last crash: $it", BAD, 15f)) }
+        column.addView(spacer())
+    }
+
+    private fun addStatus() {
+        section("CHECK")
+        val overlayOk = Settings.canDrawOverlays(this)
+        val keysOn = AccessibilityState.isEnabled(this)
+        val keysReady = Settings.keysReadyAt(this) > 0L
+
+        addRow(
+            Row("status_overlay", "Screen dimming", {
+                if (overlayOk) "Ready" else "Overlay permission missing — press OK"
+            }, { if (overlayOk) GOOD else BAD }),
+            { openOverlaySettings() }
+        )
+
+        addRow(
+            Row("status_keys", "Remote keys", {
+                when {
+                    !keysOn -> "Off — press OK to turn on"
+                    !keysReady -> "On — waiting for the box…"
+                    else -> "On"
                 }
-                previous?.uncaughtException(thread, throwable)
+            }, { if (keysOn) GOOD else BAD }),
+            { openAccessibilitySettings() }
+        )
+        column.addView(spacer())
+    }
+
+    private fun addModes() {
+        section("MODE   ·   OK SWITCHES")
+        val current = Settings.getMood(this)
+        for (mood in Settings.MOODS) {
+            val selected = mood == current
+            val row = Row(
+                "mode_$mood",
+                "${if (selected) "●" else "○"}  ${Settings.moodName(mood)}",
+                {
+                    when (mood) {
+                        Settings.MOOD_DAY -> "brightness ${Settings.getDayBrightness(this)}%"
+                        Settings.MOOD_NIGHT -> "brightness ${Settings.getNightBrightness(this)}%"
+                        else -> "glow ${Settings.getAmbientLevel(this)}% · " +
+                            "${Settings.ambientColorName(this)} · " +
+                            Settings.timerLabel(Settings.getSleepTimerMinutes(this))
+                    }
+                },
+                { if (selected) ACCENT else MUTED },
+                selected
+            )
+            row.onOk = {
+                OverlayService.send(this, OverlayService.ACTION_SET_MOOD, mood)
+                render()
             }
-        } catch (_: Exception) {
-            // No logger is better than a logger that crashes startup.
+            addRow(row)
+        }
+        column.addView(spacer())
+    }
+
+    private fun addTuning() {
+        section("TUNE   ·   ◀ ▶ CHANGES")
+        choiceRow(
+            "tune_day", "Day brightness", Settings.DAY_BRIGHTNESS_OPTIONS,
+            { Settings.getDayBrightness(this) },
+            {
+                Settings.setDayBrightness(this, it)
+                if (Settings.getMood(this) == Settings.MOOD_DAY) applyCurrentMood()
+            },
+            { "$it%" }
+        )
+        choiceRow(
+            "tune_night", "Night brightness", Settings.NIGHT_BRIGHTNESS_OPTIONS,
+            { Settings.getNightBrightness(this) },
+            {
+                Settings.setNightBrightness(this, it)
+                if (Settings.getMood(this) == Settings.MOOD_NIGHT) applyCurrentMood()
+            },
+            { "$it%" }
+        )
+        choiceRow(
+            "tune_glow", "Sleep glow", (Settings.AMBIENT_MIN..Settings.AMBIENT_MAX)
+                .step(Settings.AMBIENT_STEP).toList(),
+            { Settings.getAmbientLevel(this) },
+            {
+                Settings.setAmbientLevel(this, it)
+                if (Settings.isAmbient(this)) applyCurrentMood()
+            },
+            { "$it%" }
+        )
+        choiceRow(
+            "tune_colour", "Sleep colour", Settings.AMBIENT_COLORS.indices.toList(),
+            { Settings.getAmbientColorIndex(this) },
+            {
+                Settings.setAmbientColorIndex(this, it)
+                if (Settings.isAmbient(this)) applyCurrentMood()
+            },
+            { Settings.AMBIENT_COLORS[it].first }
+        )
+        choiceRow(
+            "tune_timer", "Sleep timer", Settings.SLEEP_TIMER_OPTIONS,
+            { Settings.getSleepTimerMinutes(this) },
+            {
+                Settings.setSleepTimerMinutes(this, it)
+                OverlayService.send(this, OverlayService.ACTION_SET_SLEEP_TIMER, it)
+            },
+            { Settings.timerLabel(it) }
+        )
+        choiceRow(
+            "tune_fade", "Soft transitions", listOf(0, 1),
+            { if (Settings.isFadeEnabled(this)) 1 else 0 },
+            { Settings.setFadeEnabled(this, it == 1) },
+            { if (it == 1) "On" else "Off" }
+        )
+        column.addView(spacer())
+    }
+
+    private fun addAutomation() {
+        section("AUTOMATION")
+        choiceRow(
+            "auto_schedule", "Night schedule", listOf(0, 1),
+            { if (Settings.isScheduleEnabled(this)) 1 else 0 },
+            {
+                Settings.setScheduleEnabled(this, it == 1)
+                OverlayService.send(this, null)
+            },
+            { if (it == 1) "On" else "Off" }
+        )
+        choiceRow(
+            "auto_dim", "Dim at", Settings.SCHEDULE_DIM_HOURS,
+            { Settings.getScheduleDimHour(this) },
+            { Settings.setScheduleDimHour(this, it); OverlayService.send(this, null) },
+            { Settings.formatHour(it) }
+        )
+        choiceRow(
+            "auto_restore", "Restore at", Settings.SCHEDULE_RESTORE_HOURS,
+            { Settings.getScheduleRestoreHour(this) },
+            { Settings.setScheduleRestoreHour(this, it); OverlayService.send(this, null) },
+            { Settings.formatHour(it) }
+        )
+        choiceRow(
+            "auto_idle", "Auto-dim when idle", Settings.IDLE_MINUTES_OPTIONS,
+            { Settings.getIdleMinutes(this) },
+            { Settings.setIdleMinutes(this, it); OverlayService.send(this, null) },
+            { Settings.timerLabel(it) }
+        )
+        choiceRow(
+            "auto_tv_on", "Wake TV with box", listOf(0, 1),
+            { if (Settings.isTvPowerOnEnabled(this)) 1 else 0 },
+            { Settings.setTvPowerOnEnabled(this, it == 1) },
+            { if (it == 1) "On" else "Off" }
+        )
+        choiceRow(
+            "auto_tv_off", "Sleep TV with box", listOf(0, 1),
+            { if (Settings.isTvPowerOffEnabled(this)) 1 else 0 },
+            { Settings.setTvPowerOffEnabled(this, it == 1) },
+            { if (it == 1) "On" else "Off" }
+        )
+        column.addView(spacer())
+    }
+
+    private fun addRemote() {
+        section("REMOTE   ·   ONE KEY IS ENOUGH")
+        val learning = Settings.learnTarget(this)
+        val modeRow = Row(
+            "key_mode", "Mode key",
+            {
+                if (learning == Settings.KEY_MODE_KEY) "Press a remote button…"
+                else Settings.keyLabel(this, Settings.KEY_MODE_KEY)
+            },
+            { if (learning.isNotEmpty()) ACCENT else MUTED }
+        )
+        modeRow.onOk = { startLearn(Settings.KEY_MODE_KEY) }
+        addRow(modeRow)
+
+        // 1.x mappings are kept, but only shown if this box already has them:
+        // the whole point of 2.0 is that nobody needs a second button.
+        val legacy = listOf(
+            Settings.KEY_BRIGHTER to "Optional · brighter",
+            Settings.KEY_DIMMER to "Optional · dimmer",
+            Settings.KEY_TOGGLE to "Optional · blackout",
+            Settings.KEY_AMBIENT to "Optional · sleep light"
+        )
+        for ((key, label) in legacy) {
+            if (Settings.getKey(this, key) == Settings.UNSET) continue
+            val row = Row("key_$key", label, { Settings.keyLabel(this, key) })
+            row.onOk = {
+                Settings.setKey(this, key, Settings.UNSET)
+                render()
+            }
+            addRow(row)
+        }
+
+        if (Settings.anyKeyMapped(this)) {
+            addRow(
+                Row("keys_clear", "Forget all keys", { "Press OK" }),
+                {
+                    Settings.clearKeys(this)
+                    render()
+                    toast("Keys cleared")
+                }
+            )
+        }
+
+        addRow(
+            Row("stop", "Turn dimmer off", { "Removes the overlay" }),
+            {
+                OverlayService.send(this, OverlayService.ACTION_STOP)
+                toast("Dimmer off")
+            }
+        )
+        column.addView(spacer())
+    }
+
+    private fun addFooter() {
+        column.addView(info("◀ ▶ changes a value · OK selects · BACK leaves", MUTED, 15f))
+        column.addView(info("LeoDimmer 2.0", MUTED, 14f))
+    }
+
+    // ---- Rows ----
+
+    private inner class Row(
+        rowTag: String,
+        private val rowTitle: String,
+        private val detailProvider: () -> String,
+        private val detailColor: () -> Int = { MUTED },
+        private val accentTitle: Boolean = false
+    ) : LinearLayout(this@MainActivity) {
+
+        var onLeft: (() -> Unit)? = null
+        var onRight: (() -> Unit)? = null
+        var onOk: (() -> Unit)? = null
+
+        private val titleView = TextView(this@MainActivity)
+        private val detailView = TextView(this@MainActivity)
+
+        init {
+            tag = rowTag
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isFocusable = true
+            isFocusableInTouchMode = true
+            isClickable = true
+            setPadding(dp(24), dp(15), dp(24), dp(15))
+            background = this@MainActivity.getDrawable(R.drawable.row_background)
+
+            titleView.text = rowTitle
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+            titleView.setTextColor(if (accentTitle) ACCENT else TEXT)
+            detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            detailView.gravity = Gravity.END
+
+            addView(
+                titleView,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(
+                detailView,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            setOnClickListener {
+                onOk?.invoke()
+                refresh()
+            }
+            refresh()
+        }
+
+        fun refresh() {
+            detailView.text = detailProvider()
+            detailView.setTextColor(detailColor())
+        }
+
+        override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> onLeft?.let {
+                    it.invoke()
+                    refresh()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> onRight?.let {
+                    it.invoke()
+                    refresh()
+                    return true
+                }
+            }
+            return super.onKeyDown(keyCode, event)
         }
     }
 
-    fun lastCrashLine(): String? = try {
-        val text = openFileInput("crash.log").bufferedReader().readText()
-        text.lineSequence().firstOrNull { it.isNotBlank() }
-    } catch (_: Exception) {
-        null
+    private fun addRow(row: Row, onOk: (() -> Unit)? = null) {
+        if (onOk != null) row.onOk = onOk
+        column.addView(row)
     }
 
-    fun startDimmerService(action: String?, value: Int?) {
-        val intent = Intent(this, DimmerService::class.java).apply {
-            if (action != null) putExtra("action", action)
-            if (value != null) putExtra("value", value)
+    private fun choiceRow(
+        tag: String,
+        title: String,
+        options: List<Int>,
+        get: () -> Int,
+        set: (Int) -> Unit,
+        label: (Int) -> String
+    ) {
+        val row = Row(tag, title, { label(get()) })
+        fun step(forward: Boolean) {
+            val index = options.indexOf(get()).let { if (it < 0) 0 else it }
+            val next = if (forward) {
+                options[(index + 1) % options.size]
+            } else {
+                options[(index - 1 + options.size) % options.size]
+            }
+            set(next)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        row.onLeft = { step(false) }
+        row.onRight = { step(true) }
+        addRow(row)
+    }
+
+    private fun section(text: String) {
+        column.addView(info(text, ACCENT, 15f, bold = true))
+    }
+
+    private fun info(
+        message: String,
+        color: Int = MUTED,
+        sizeSp: Float = 17f,
+        bold: Boolean = false
+    ): TextView = TextView(this).apply {
+        text = message
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+        setTextColor(color)
+        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setPadding(dp(24), dp(5), dp(24), dp(5))
+    }
+
+    private fun spacer(): View = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(10)
+        )
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    // ---- Actions ----
+
+    /** Re-apply the mode in use after one of its values changed. */
+    private fun applyCurrentMood() {
+        OverlayService.send(this, OverlayService.ACTION_SET_MOOD, Settings.getMood(this))
     }
 
     /**
-     * The Mi Box's Android 9 build does not always resolve the per-app
-     * overlay page, which is why the overlay grant was impossible to find:
-     * "Open settings" did nothing. Fall back down the chain instead of
-     * leaving the user with no page at all -- the global overlay page, then
-     * this app's own info page, where Xiaomi hides "Display over other apps"
-     * under Special access / Permissions.
+     * Arm learning in the accessibility service, not here: the next button is
+     * caught wherever the focus is, so there is no window that can miss it.
      */
-    fun openOverlaySettings() {
+    private fun startLearn(target: String) {
+        if (!AccessibilityState.isEnabled(this)) {
+            toast("Turn on Remote keys first")
+            openAccessibilitySettings()
+            return
+        }
+        Settings.armLearn(this, target)
+        render()
+        pollLearning()
+    }
+
+    private fun pollLearning() {
+        handler.removeCallbacksAndMessages(null)
+        val started = System.currentTimeMillis()
+        val poll = object : Runnable {
+            override fun run() {
+                if (Settings.learnTarget(this@MainActivity).isEmpty()) {
+                    learnPoll = null
+                    render()
+                    return
+                }
+                if (System.currentTimeMillis() - started > 20_000) {
+                    Settings.clearLearn(this@MainActivity)
+                    learnPoll = null
+                    toast("No button arrived — check that Remote keys is on")
+                    render()
+                    return
+                }
+                handler.postDelayed(this, 400)
+            }
+        }
+        learnPoll = poll
+        handler.postDelayed(poll, 400)
+    }
+
+    /**
+     * The per-app overlay page does not resolve on every TV build (that is why
+     * the permission was impossible to find), so fall back until one of these
+     * pages actually opens.
+     */
+    private fun openOverlaySettings() {
         val candidates = listOf(
             Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")
             ),
-            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
+            Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
             Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:$packageName")
             )
         )
-        candidates.any { startIfResolvable(it) }
+        if (!openFirst(candidates)) toast("Open Settings → Apps → Special access")
     }
 
-    private fun startIfResolvable(intent: Intent): Boolean {
-        if (intent.resolveActivity(packageManager) == null) return false
-        return try {
-            startActivity(intent)
-            true
-        } catch (_: Exception) {
-            // A vendor build can resolve but still refuse it; try the next one.
-            false
-        }
-    }
-
-    fun openAccessibilitySettings() {
-        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-    }
-}
-
-/**
- * The Leanback GuidedStep itself. Descriptions are rebuilt from prefs on
- * every creation, so after a remap the activity simply recreates and the
- * new keycode shows up here. That is deliberately simple: no live adapter
- * to keep in sync on a screen the user visits rarely.
- */
-class DimmerSettingsFragment : GuidedStepSupportFragment() {
-
-    companion object {
-        private const val ID_BRIGHTER_KEY = 1L
-        private const val ID_DIMMER_KEY = 2L
-        private const val ID_TOGGLE_KEY = 3L
-        private const val ID_AMBIENT_KEY = 4L
-        private const val ID_TEST_BRIGHTER = 5L
-        private const val ID_TEST_DIMMER = 6L
-        private const val ID_TEST_TOGGLE = 7L
-        private const val ID_TEST_AMBIENT = 8L
-        private const val ID_AMBIENT_LEVEL = 9L
-        private const val ID_PERM_OVERLAY = 10L
-        private const val ID_PERM_ACCESSIBILITY = 11L
-        private const val ID_TV_POWER_ON = 12L
-        private const val ID_TV_POWER_OFF = 13L
-        private const val ID_STOP = 14L
-        private const val ID_RESET_KEYS = 15L
-        private const val ID_SLEEP_TIMER = 16L
-        // v1.4 merged rows (presets, sleep-light colour, schedule, idle, fade).
-        private const val ID_PRESET_75 = 17L
-        private const val ID_PRESET_50 = 18L
-        private const val ID_PRESET_25 = 19L
-        private const val ID_PRESET_BLACKOUT = 20L
-        private const val ID_AMBIENT_COLOR = 21L
-        private const val ID_SCHEDULE_TOGGLE = 22L
-        private const val ID_SCHEDULE_DIM_HOUR = 23L
-        private const val ID_SCHEDULE_RESTORE_HOUR = 24L
-        private const val ID_SCHEDULE_DIM_PERCENT = 25L
-        private const val ID_IDLE_TIMER = 26L
-        private const val ID_FADE_TOGGLE = 27L
-        // v1.9 moods: three states on one key (Day / Night / Sleep).
-        private const val ID_MOOD_CYCLE = 28L
-        private const val ID_DAY_BRIGHTNESS = 29L
-        private const val ID_NIGHT_BRIGHTNESS = 30L
-        private const val ID_MODE_KEY = 31L
-
-        /** Sleep-light levels the settings row steps through. */
-        private val AMBIENT_LEVELS = intArrayOf(10, 20, 30, 40, 50, 60)
-    }
-
-    private val host: MainActivity?
-        get() = activity as? MainActivity
-
-    override fun onCreateGuidance(savedInstanceState: Bundle?): GuidanceStylist.Guidance {
-        val ctx = requireContext()
-        val brightness = DimmerPrefs.getBrightness(ctx)
-        val overlay = if (Settings.canDrawOverlays(ctx)) "granted" else "MISSING"
-        val accessibility =
-            if (AccessibilityState.isEnabled(ctx)) "enabled" else "MISSING"
-        val state = when {
-            DimmerPrefs.isBlackout(ctx) -> "blackout (audio-only)"
-            DimmerPrefs.isAmbient(ctx) -> "sleep light " +
-                "${DimmerPrefs.ambientColorName(ctx)} ${DimmerPrefs.getAmbientLevel(ctx)}%"
-            else -> "normal"
-        }
-        val schedule = if (DimmerPrefs.isScheduleEnabled(ctx)) {
-            "Schedule: dim to ${DimmerPrefs.getScheduleDimPercent(ctx)}% at " +
-                "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleDimHour(ctx))}, " +
-                "restore at ${DimmerPrefs.formatHour(DimmerPrefs.getScheduleRestoreHour(ctx))}\n"
-        } else {
-            "Schedule: off\n"
-        }
-        // Each line is built separately: concatenating an if-expression with +
-        // used to bind the whole tail to one branch and drop the status lines.
-        val crash = host?.lastCrashLine()
-        val description = buildString {
-            append(
-                "Mode: ${DimmerPrefs.moodName(DimmerPrefs.getMood(ctx))} — " +
-                    "brightness $brightness% — $state\n"
+    private fun openAccessibilitySettings() {
+        val candidates = listOf(
+            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS),
+            Intent(
+                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName")
             )
-            append(schedule)
-            append("Idle blackout: ${DimmerPrefs.timerLabel(DimmerPrefs.getIdleMinutes(ctx))}\n")
-            append("Smooth fade: ${if (DimmerPrefs.isFadeEnabled(ctx)) "on" else "off"}\n")
-            append("Overlay permission: $overlay\n")
-            append("Accessibility service: $accessibility\n")
-            if (crash != null) {
-                append("Last crash on this box: $crash\n")
-            }
-            append(
-                "One remote button is enough: map the Mode key and press it to " +
-                    "cycle Day → Night → Sleep. The other keys are optional."
-            )
-        }
-        return GuidanceStylist.Guidance(
-            "LeoDimmer",
-            description,
-            "Settings",
-            null
         )
+        if (!openFirst(candidates)) toast("Open Settings → Device → Accessibility")
     }
 
-    override fun onCreateActions(actions: MutableList<GuidedAction>, savedInstanceState: Bundle?) {
-        val ctx = requireContext()
-        // A sleep light or blackout entered without the accessibility
-        // service has no remote-button restore path (blackout auto-restores
-        // in 1 min; the sleep light does not). Warn, don't block: the user
-        // can still turn it off from this screen or the notification.
-        val accessibilityMissing = !AccessibilityState.isEnabled(ctx)
-        val restoreWarning = if (accessibilityMissing) {
-            " — Accessibility is MISSING, so no remote button can turn it off; use this screen or the notification's Turn off action"
-        } else {
-            ""
-        }
-        fun action(id: Long, title: String, description: String) =
-            GuidedAction.Builder(ctx).id(id).title(title).description(description).build()
-
-        fun toggle(id: Long, title: String, description: String, checked: Boolean) =
-            GuidedAction.Builder(ctx)
-                .id(id)
-                .title(title)
-                .description(description)
-                .checkSetId(GuidedAction.DEFAULT_CHECK_SET_ID)
-                .checked(checked)
-                .build()
-
-        val mood = DimmerPrefs.getMood(ctx)
-        val nextMood = DimmerPrefs.nextMood(mood)
-        actions += action(
-            ID_MOOD_CYCLE, "Mode: ${DimmerPrefs.moodName(mood)}",
-            "Select to switch to ${DimmerPrefs.moodName(nextMood)}"
-        )
-        actions += action(
-            ID_DAY_BRIGHTNESS, "Day mode brightness",
-            "${DimmerPrefs.getDayBrightness(ctx)}% — select to step 100 / 90 / 80 / 70%"
-        )
-        actions += action(
-            ID_NIGHT_BRIGHTNESS, "Night mode brightness",
-            "${DimmerPrefs.getNightBrightness(ctx)}% — " +
-                "select to step 10 / 15 / 20 / 25 / 30 / 40 / 50%"
-        )
-        // One button for everything: this is the only mapping a short remote
-        // needs. Mapped first so it is the top row of the key section.
-        actions += action(
-            ID_MODE_KEY, "Mode key (Day / Night / Sleep)",
-            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_MODE_KEY)
-        )
-        actions += action(
-            ID_BRIGHTER_KEY, "Optional: increase brightness key",
-            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_BRIGHTER)
-        )
-        actions += action(
-            ID_DIMMER_KEY, "Optional: decrease brightness key",
-            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_DIMMER)
-        )
-        actions += action(
-            ID_TOGGLE_KEY, "Optional: toggle blackout key",
-            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_TOGGLE)
-        )
-        actions += action(
-            ID_AMBIENT_KEY, "Optional: sleep light key",
-            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_AMBIENT)
-        )
-        actions += action(ID_TEST_BRIGHTER, "Test: brighter", "Step brightness up by 10% now")
-        actions += action(ID_TEST_DIMMER, "Test: dimmer", "Step brightness down by 10% now")
-        actions += action(ID_TEST_TOGGLE, "Test: toggle blackout", "Switch blackout on / off now")
-        actions += action(
-            ID_TEST_AMBIENT, "Test: sleep light",
-            "Dim light for falling asleep — toggle on / off now$restoreWarning"
-        )
-        actions += action(
-            ID_AMBIENT_LEVEL, "Sleep light level",
-            "${DimmerPrefs.getAmbientLevel(ctx)}% — select to step 10 / 20 / … / 60%"
-        )
-        actions += action(
-            ID_SLEEP_TIMER, "Sleep timer",
-            sleepTimerLabel(DimmerPrefs.getSleepTimerMinutes(ctx))
-        )
-        actions += action(ID_PRESET_75, "Preset: 75% brightness", "Jump straight to 75%")
-        actions += action(ID_PRESET_50, "Preset: 50% brightness", "Jump straight to 50%")
-        actions += action(ID_PRESET_25, "Preset: 25% brightness", "Jump straight to 25%")
-        actions += action(
-            ID_PRESET_BLACKOUT, "Preset: blackout",
-            "Jump straight to blackout$restoreWarning"
-        )
-        actions += action(
-            ID_AMBIENT_COLOR, "Sleep light colour",
-            "${DimmerPrefs.ambientColorName(ctx)} — select for next colour"
-        )
-        actions += action(
-            ID_SCHEDULE_TOGGLE, "Night schedule",
-            if (DimmerPrefs.isScheduleEnabled(ctx)) "On — select to turn off" else "Off — select to turn on"
-        )
-        actions += action(
-            ID_SCHEDULE_DIM_HOUR, "Schedule: dim at",
-            "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleDimHour(ctx))} — select for next hour"
-        )
-        actions += action(
-            ID_SCHEDULE_RESTORE_HOUR, "Schedule: restore at",
-            "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleRestoreHour(ctx))} — select for next hour"
-        )
-        actions += action(
-            ID_SCHEDULE_DIM_PERCENT, "Schedule: dim to",
-            "${DimmerPrefs.getScheduleDimPercent(ctx)}% — select for next level"
-        )
-        actions += action(
-            ID_IDLE_TIMER, "Idle blackout timer",
-            "${DimmerPrefs.timerLabel(DimmerPrefs.getIdleMinutes(ctx))} — " +
-                "select for next value (any key resets it)"
-        )
-        actions += action(
-            ID_FADE_TOGGLE, "Smooth fade",
-            if (DimmerPrefs.isFadeEnabled(ctx)) "On — select to turn off" else "Off — select to turn on"
-        )
-        actions += action(
-            ID_PERM_OVERLAY, "Overlay permission",
-            if (Settings.canDrawOverlays(ctx)) {
-                "Granted — nothing dims without it"
-            } else {
-                "Missing — select to open it: Settings → Apps → Special access → " +
-                    "Display over other apps → LeoDimmer → Allow"
+    private fun openFirst(intents: List<Intent>): Boolean =
+        intents.any { intent ->
+            if (intent.resolveActivity(packageManager) == null) return@any false
+            try {
+                startActivity(intent)
+                true
+            } catch (_: Exception) {
+                false
             }
-        )
-        actions += action(
-            ID_PERM_ACCESSIBILITY, "Accessibility service",
-            if (AccessibilityState.isEnabled(ctx)) "Enabled" else "Missing — select to open system settings"
-        )
-        actions += toggle(
-            ID_TV_POWER_ON, "TV power on with box",
-            "Ask the TV to wake when the box boots or wakes from standby (HDMI-CEC, with a fallback)",
-            DimmerPrefs.isTvPowerOnEnabled(ctx)
-        )
-        actions += toggle(
-            ID_TV_POWER_OFF, "TV power off with box",
-            "Attempt HDMI-CEC standby when the box shuts down; most boxes block this — the TV's own CEC auto-off is the reliable route",
-            DimmerPrefs.isTvPowerOffEnabled(ctx)
-        )
-        actions += action(
-            ID_STOP, "Turn dimmer off",
-            "Remove the overlay now and stop restarting it at boot"
-        )
-        actions += action(ID_RESET_KEYS, "Reset all key mappings", "Clear the four mapped buttons")
-    }
-
-    override fun onGuidedActionClicked(action: GuidedAction) {
-        val ctx = requireContext()
-        val activity = host ?: return
-        val prefs = DimmerPrefs.prefs(ctx)
-        fun cycleInt(key: String, values: List<Int>, current: Int) {
-            val next = values[(values.indexOf(current) + 1).coerceAtLeast(0) % values.size]
-            prefs.edit().putInt(key, next).apply()
-            activity.startDimmerService(null, null)
-            activity.recreate()
-        }
-        when (action.id) {
-            ID_BRIGHTER_KEY -> showKeyDialog("Increase Brightness", DimmerPrefs.KEY_BRIGHTER)
-            ID_DIMMER_KEY -> showKeyDialog("Decrease Brightness", DimmerPrefs.KEY_DIMMER)
-            ID_TOGGLE_KEY -> showKeyDialog("Toggle Blackout", DimmerPrefs.KEY_TOGGLE)
-            ID_AMBIENT_KEY -> showKeyDialog("Sleep Light", DimmerPrefs.KEY_AMBIENT)
-            ID_TEST_BRIGHTER -> {
-                activity.startDimmerService(DimmerService.ACTION_BRIGHTER, null)
-                activity.recreate()
-            }
-            ID_TEST_DIMMER -> {
-                activity.startDimmerService(DimmerService.ACTION_DIMMER, null)
-                activity.recreate()
-            }
-            ID_TEST_TOGGLE -> {
-                activity.startDimmerService(DimmerService.ACTION_TOGGLE_BLACKOUT, null)
-                activity.recreate()
-            }
-            ID_TEST_AMBIENT -> {
-                activity.startDimmerService(DimmerService.ACTION_TOGGLE_AMBIENT, null)
-                activity.recreate()
-            }
-            ID_AMBIENT_LEVEL -> {
-                val next = nextAmbientLevel(DimmerPrefs.getAmbientLevel(ctx))
-                activity.startDimmerService(DimmerService.ACTION_SET_AMBIENT_LEVEL, next)
-                activity.recreate()
-            }
-            ID_SLEEP_TIMER -> {
-                val next = nextSleepTimer(DimmerPrefs.getSleepTimerMinutes(ctx))
-                activity.startDimmerService(DimmerService.ACTION_SET_SLEEP_TIMER, next)
-                activity.recreate()
-            }
-            ID_PRESET_75 -> {
-                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 75)
-                activity.recreate()
-            }
-            ID_PRESET_50 -> {
-                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 50)
-                activity.recreate()
-            }
-            ID_PRESET_25 -> {
-                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 25)
-                activity.recreate()
-            }
-            ID_PRESET_BLACKOUT -> {
-                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 0)
-                activity.recreate()
-            }
-            ID_AMBIENT_COLOR -> {
-                val next = (DimmerPrefs.getAmbientColorIndex(ctx) + 1) %
-                    DimmerPrefs.AMBIENT_COLORS.size
-                prefs.edit().putInt(DimmerPrefs.KEY_AMBIENT_COLOR_INDEX, next).apply()
-                // Refresh the live tint immediately if the light is on.
-                if (DimmerPrefs.isAmbient(ctx)) {
-                    activity.startDimmerService(
-                        DimmerService.ACTION_SET_AMBIENT_LEVEL,
-                        DimmerPrefs.getAmbientLevel(ctx)
-                    )
-                }
-                activity.recreate()
-            }
-            ID_SCHEDULE_TOGGLE -> {
-                val turningOn = !DimmerPrefs.isScheduleEnabled(ctx)
-                val state = prefs.getInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0)
-                val edit = prefs.edit().putBoolean(
-                    DimmerPrefs.KEY_SCHEDULE_ENABLED, turningOn
-                )
-                if (!turningOn && state == 1 &&
-                    !DimmerPrefs.isAmbient(ctx) && !DimmerPrefs.isBlackout(ctx)
-                ) {
-                    // Turning the schedule off mid-window must restore
-                    // the picture now, not leave the dim in place.
-                    val restoreTo = prefs.getInt(
-                        DimmerPrefs.KEY_SCHEDULE_PRE_BRIGHTNESS, 100
-                    ).coerceIn(0, 100)
-                    edit.putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0).apply()
-                    activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, restoreTo)
-                } else {
-                    if (!turningOn) edit.putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0)
-                    edit.apply()
-                    activity.startDimmerService(null, null)
-                }
-                activity.recreate()
-            }
-            ID_SCHEDULE_DIM_HOUR -> cycleInt(
-                DimmerPrefs.KEY_SCHEDULE_DIM_HOUR,
-                DimmerPrefs.SCHEDULE_DIM_HOURS,
-                DimmerPrefs.getScheduleDimHour(ctx)
-            )
-            ID_SCHEDULE_RESTORE_HOUR -> cycleInt(
-                DimmerPrefs.KEY_SCHEDULE_RESTORE_HOUR,
-                DimmerPrefs.SCHEDULE_RESTORE_HOURS,
-                DimmerPrefs.getScheduleRestoreHour(ctx)
-            )
-            ID_SCHEDULE_DIM_PERCENT -> cycleInt(
-                DimmerPrefs.KEY_SCHEDULE_DIM_PERCENT,
-                DimmerPrefs.SCHEDULE_DIM_PERCENTS,
-                DimmerPrefs.getScheduleDimPercent(ctx)
-            )
-            ID_IDLE_TIMER -> cycleInt(
-                DimmerPrefs.KEY_IDLE_MINUTES,
-                DimmerPrefs.IDLE_MINUTES_OPTIONS,
-                DimmerPrefs.getIdleMinutes(ctx)
-            )
-            ID_FADE_TOGGLE -> {
-                prefs.edit().putBoolean(
-                    DimmerPrefs.KEY_FADE_ENABLED,
-                    !DimmerPrefs.isFadeEnabled(ctx)
-                ).apply()
-                activity.recreate()
-            }
-            ID_MOOD_CYCLE -> {
-                val next = DimmerPrefs.nextMood(DimmerPrefs.getMood(ctx))
-                activity.startDimmerService(DimmerService.ACTION_SET_MOOD, next)
-                activity.recreate()
-            }
-            ID_DAY_BRIGHTNESS -> {
-                val next = nextIn(
-                    DimmerPrefs.DAY_BRIGHTNESS_OPTIONS,
-                    DimmerPrefs.getDayBrightness(ctx)
-                )
-                prefs.edit().putInt(DimmerPrefs.KEY_DAY_BRIGHTNESS, next).apply()
-                // Only re-apply if Day is the mode in use; otherwise the new
-                // level simply waits for the next Day press.
-                if (DimmerPrefs.getMood(ctx) == DimmerPrefs.MOOD_DAY) {
-                    activity.startDimmerService(DimmerService.ACTION_SET_MOOD, DimmerPrefs.MOOD_DAY)
-                }
-                activity.recreate()
-            }
-            ID_NIGHT_BRIGHTNESS -> {
-                val next = nextIn(
-                    DimmerPrefs.NIGHT_BRIGHTNESS_OPTIONS,
-                    DimmerPrefs.getNightBrightness(ctx)
-                )
-                prefs.edit().putInt(DimmerPrefs.KEY_NIGHT_BRIGHTNESS, next).apply()
-                if (DimmerPrefs.getMood(ctx) == DimmerPrefs.MOOD_NIGHT) {
-                    activity.startDimmerService(DimmerService.ACTION_SET_MOOD, DimmerPrefs.MOOD_NIGHT)
-                }
-                activity.recreate()
-            }
-            ID_MODE_KEY -> showKeyDialog("Cycle Day / Night / Sleep", DimmerPrefs.KEY_MODE_KEY)
-            ID_PERM_OVERLAY -> activity.openOverlaySettings()
-            ID_PERM_ACCESSIBILITY -> activity.openAccessibilitySettings()
-            ID_TV_POWER_ON -> {
-                DimmerPrefs.setTvPowerOnEnabled(ctx, !DimmerPrefs.isTvPowerOnEnabled(ctx))
-                activity.recreate()
-            }
-            ID_TV_POWER_OFF -> {
-                DimmerPrefs.setTvPowerOffEnabled(ctx, !DimmerPrefs.isTvPowerOffEnabled(ctx))
-                activity.recreate()
-            }
-            ID_STOP -> {
-                activity.startDimmerService(DimmerService.ACTION_STOP, null)
-                activity.recreate()
-            }
-            ID_RESET_KEYS -> {
-                DimmerPrefs.clearKeys(ctx)
-                activity.recreate()
-            }
-            else -> Unit
-        }
-    }
-
-    /** Step through a fixed option list, wrapping back to the first entry. */
-    private fun nextIn(values: List<Int>, current: Int): Int =
-        values[(values.indexOf(current) + 1) % values.size]
-
-    private fun nextAmbientLevel(current: Int): Int =
-        AMBIENT_LEVELS.firstOrNull { it > current } ?: AMBIENT_LEVELS.first()
-
-    private fun nextSleepTimer(current: Int): Int {
-        val options = DimmerPrefs.SLEEP_TIMER_OPTIONS
-        return options.firstOrNull { it > current } ?: options.first()
-    }
-
-    private fun sleepTimerLabel(minutes: Int): String =
-        if (minutes <= 0) {
-            "Off — the sleep light stays on until you turn it off"
-        } else {
-            "$minutes min — the sleep light fades to black after $minutes min, " +
-                "then any key restores a dim picture"
         }
 
-    private fun showKeyDialog(actionLabel: String, prefsKey: String) {
-        // The activity owns the capture: it is the window that keeps focus.
-        host?.startKeyCapture(actionLabel, prefsKey)
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 }
