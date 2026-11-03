@@ -28,11 +28,32 @@ import android.widget.Toast
  */
 class KeyService : AccessibilityService() {
 
+    companion object {
+        /**
+         * The live service, so the settings screen can ask it for a global
+         * action. AccessibilityService is the only way a sideloaded app can
+         * open the system power dialog, and it has to be called on the bound
+         * instance.
+         */
+        private var live: KeyService? = null
+
+        /** Opens the box's power menu. False when the service is not running. */
+        fun powerDialog(): Boolean {
+            val service = live ?: return false
+            return try {
+                service.performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     private val lastDownMs = mutableMapOf<Int, Long>()
     private val longHandled = mutableSetOf<Int>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        live = this
         // Ask for key filtering at runtime as well as in the XML: a few vendor
         // builds only honour the service-info flag.
         try {
@@ -56,6 +77,16 @@ class KeyService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        if (live === this) live = null
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        if (live === this) live = null
+        super.onDestroy()
+    }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         // ---- 1. Learning wins over everything else ----

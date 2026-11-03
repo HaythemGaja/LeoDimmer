@@ -71,17 +71,23 @@ object TvPowerLink {
         }
     }
 
-    /** Called on boot and when the box wakes from a long standby. */
-    fun wakeTv(context: Context, reason: String) {
+    /**
+     * Called on boot and when the box wakes from a long standby. Returns
+     * whether the box actually accepted the CEC call, so the settings screen
+     * can report the truth on a given box instead of guessing.
+     */
+    fun wakeTv(context: Context, reason: String): Boolean {
         val cec = tryCecOneTouchPlay(context)
         Log.i(TAG, "TV power on ($reason): CEC one-touch-play requested=$cec")
         if (!cec) startWakeActivity(context)
+        return cec
     }
 
-    /** Called on shutdown, when the box is going away for good. */
-    fun standbyTv(context: Context) {
+    /** Called on shutdown, and by the settings screen's power test. */
+    fun standbyTv(context: Context): Boolean {
         val cec = tryCecStandby(context)
         Log.i(TAG, "TV power off: CEC standby requested=$cec")
+        return cec
     }
 
     fun standbyGapMillis(): Long = STANDBY_GAP_MILLIS

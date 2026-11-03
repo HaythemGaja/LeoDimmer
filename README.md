@@ -1,4 +1,4 @@
-# LeoDimmer 2.0
+# LeoDimmer 2.1
 
 A dimmer for Android TV, built for the Xiaomi Mi Box 4 (Android 9 / API 28).
 It dims the picture over any app, and it is designed around one constraint:
@@ -44,16 +44,66 @@ CHECK
 If either is missing, the row says so and OK opens the right system page. A
 dimmer that silently does nothing is worse than one that says why.
 
+A 1080 panel cannot hold the whole sheet, so while there is content below the
+bottom edge a **▼ more below** marker sits in the corner. `▼` scrolls to it;
+the focused row is always scrolled into view.
+
+## Turning the TV off and on
+
+Android gives a sideloaded app no direct power control: `PowerManager.goToSleep()`
+needs `DEVICE_POWER`, and HDMI-CEC needs `HDMI_CEC` — both signature-level. So the
+**POWER · TEST EACH ONE** block tests each mechanism and reports what the box
+answered, rather than one switch that pretends to always work.
+
+| What | Really off? | Needs |
+|---|---|---|
+| **Picture off / on** | no — black overlay, TV stays lit | overlay permission |
+| **Sleep (box power menu)** | yes — the box sleeps, TV follows over CEC | remote keys |
+| **Ask the TV to sleep / wake (CEC)** | only where the box exposes it | nothing; usually refused |
+| `adb shell input keyevent 177` | TV only; the box keeps running | a PC |
+| `adb shell input keyevent 26` | box sleep; TV follows when CEC is on | a PC |
+
+Blackout always works and is what the dimmer is for. The power menu is the one
+in-app path to a real sleep: it opens the box's own power dialog, so the box
+sleeps exactly as the remote's power key would make it, and a TV with
+"auto power off" CEC follows along. Waking is the mirror image — any remote
+button wakes the box, and `TvPowerLink` asks the TV to wake with CEC one-touch-play;
+when the box refuses, it launches an invisible activity, which re-drives HDMI
+output and wakes most TVs. If the TV still stays dark, the place to look is the
+TV's own CEC settings, not this app.
+
 ## Permissions, exactly
 
 1. **Display over other apps** — `Settings → Apps → Special access → Display
-   over other apps → LeoDimmer → Allow`. The app's row opens it directly; if the
-   per-app page does not resolve on the box (it often does not), it falls back to
-   the global page and then to the app info page, where Xiaomi hides the switch.
-2. **Remote keys** — `Settings → Device → Accessibility → LeoDimmer → On`.
+   over other apps → LeoDimmer → Allow`. This is the path that exists on the Mi
+   Box 4; the per-app switch under app info does not exist there. OK therefore
+   tries the per-app page, then the global list, then app info, and prints the
+   adb equivalent on screen.
+2. **Remote keys** — `Settings → Device Preferences → Accessibility → LeoDimmer
+   → On`. Some firmwares leave that list empty; OK then tries the service's own
+   toggle page first, and the adb equivalent is printed on screen.
 
 Nothing else is needed. Without (1) nothing dims; without (2) the button does
 nothing; both are visible on the screen at all times.
+
+### When the pages themselves are missing
+
+The Mi Box's TV Settings can show no "Display over other apps" entry at all, and
+no LeoDimmer in the Accessibility list. Neither grant needs a menu — from a PC
+with the box attached:
+
+```
+adb shell appops set com.universal.tvdimmer SYSTEM_ALERT_WINDOW allow
+adb shell settings put secure accessibility_enabled 1
+adb shell settings put secure enabled_accessibility_services com.universal.tvdimmer/.KeyService
+```
+
+The screen prints these lines itself while either grant is missing — directly
+under **CHECK**, and only the ones still missing. For remote keys, OK opens the
+service's *own* toggle page by component (`ACTION_ACCESSIBILITY_DETAILS_SETTINGS`)
+instead of the list, because the list is the part that comes up empty; it falls
+back to the list and then to app info. A **Check again** row re-reads both grants
+without leaving the screen.
 
 ## Learning a button
 
@@ -92,6 +142,10 @@ the system before any app sees them.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Where the Gradle daemon cannot run, `./build-manual-apk.sh` produces the same
+APK from the SDK build-tools and `kotlinc` alone. v2.0 has no libraries, so it
+downloads nothing and there is no AAR graph that can fail to arrive.
+
 `minSdk 28` on purpose — a higher minimum would refuse to install on the box.
 The prefs file (`tv_dimmer_prefs`) and its key names are unchanged from 1.x, so
 upgrading keeps existing values, including any keys already mapped.
@@ -110,9 +164,18 @@ adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action 
 
 ## When something goes wrong
 
-The settings screen shows **"Last crash: …"** — the first line of the last
+The settings screen shows a **Last crash** row with the first line of the last
 uncaught exception, written to `crash.log` in the app's files. That one line is
-usually enough to identify a device-specific failure without a logcat.
+usually enough to identify a device-specific failure without a logcat. **OK**
+clears it.
+
+The trace is stored with the version code that produced it, and a trace from any
+other build is deleted on start. That is not cosmetic: the files directory
+survives `adb install -r`, so an old install's crash used to appear on the new
+build's screen. v2.0 shipped showing
+`NoClassDefFoundError: … Landroidx/leanback/…` — left by a hand-built 1.x APK
+that was missing its Leanback jar, displayed by a build that contains no
+Leanback at all.
 
 ## What changed from 1.x
 

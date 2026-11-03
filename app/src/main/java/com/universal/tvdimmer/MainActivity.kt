@@ -9,11 +9,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -52,6 +54,8 @@ class MainActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var column: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var hint: TextView
     private var learnPoll: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,20 +75,53 @@ class MainActivity : Activity() {
             )
         }
 
-        val scroll = ScrollView(this).apply { isFillViewport = true }
+        scroll = ScrollView(this).apply { isFillViewport = true }
         column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(BG)
-            setPadding(dp(56), dp(36), dp(56), dp(56))
+            setPadding(dp(48), dp(28), dp(48), dp(40))
         }
         scroll.addView(
             column,
-            ViewGroup.LayoutParams(
+            FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
-        setContentView(scroll)
+
+        // A 1080-tall panel cannot hold the whole sheet and a TV has no
+        // scrollbar, so say when there is more below instead of letting the
+        // rest stay invisible -- that is what made the screen look finished
+        // after the three mode rows.
+        hint = TextView(this).apply {
+            text = "▼  more below"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(ACCENT)
+            setBackgroundColor(0xE60B0B0D.toInt())
+            setPadding(dp(18), dp(6), dp(18), dp(6))
+            isFocusable = false
+            isClickable = false
+            visibility = View.GONE
+        }
+
+        val root = FrameLayout(this)
+        root.addView(
+            scroll,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            hint,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.END
+            ).apply { setMargins(0, 0, dp(20), dp(10)) }
+        )
+        setContentView(root)
+        scroll.viewTreeObserver.addOnScrollChangedListener { updateHint() }
     }
 
     override fun onResume() {
@@ -107,14 +144,25 @@ class MainActivity : Activity() {
         column.removeAllViews()
         addHeader()
         addStatus()
+        addAdbHelp()
         addModes()
         addTuning()
+        addPower()
         addAutomation()
         addRemote()
         addFooter()
         val restore = focused?.let { column.findViewWithTag<View>(it) }
             ?: column.findViewWithTag<View>("mode_${Settings.getMood(this)}")
-        column.post { restore?.requestFocus() }
+        column.post {
+            restore?.requestFocus()
+            updateHint()
+        }
+    }
+
+    /** "▼ more below" only while there is content past the bottom edge. */
+    private fun updateHint() {
+        if (!::scroll.isInitialized || !::hint.isInitialized) return
+        hint.visibility = if (scroll.canScrollVertically(1)) View.VISIBLE else View.GONE
     }
 
     private fun addHeader() {
@@ -138,15 +186,28 @@ class MainActivity : Activity() {
         row.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(pill)
         column.addView(row)
-        column.addView(info("One remote button: Day → Night → Sleep.", MUTED, 17f))
-        CrashLog.firstLine(this)?.let { column.addView(info("Last crash: $it", BAD, 15f)) }
+        column.addView(info("One remote button: Day → Night → Sleep.", MUTED, 16f))
+
+        // Only a trace from THIS build is shown (see CrashLog): a crash from an
+        // older install survives an upgrade in the files directory, and v2.0
+        // was displaying an old Leanback failure as if it were current.
+        CrashLog.lastCrash(this)?.let { crash ->
+            val crashRow = Row("crash", "Last crash", { crash }, { BAD })
+            crashRow.onOk = {
+                CrashLog.clear(this)
+                toast("Crash report cleared")
+                render()
+            }
+            addRow(crashRow)
+        }
         column.addView(spacer())
     }
 
     private fun addStatus() {
         section("CHECK")
         val overlayOk = Settings.canDrawOverlays(this)
-        val keysOn = AccessibilityState.isEnabled(this)
+        val keysDeclared = keyServiceDeclared()
+        val keysOn = keysDeclared && AccessibilityState.isEnabled(this)
         val keysReady = Settings.keysReadyAt(this) > 0L
 
         addRow(
@@ -159,12 +220,70 @@ class MainActivity : Activity() {
         addRow(
             Row("status_keys", "Remote keys", {
                 when {
+                    !keysDeclared -> "Not in this build — reinstall"
                     !keysOn -> "Off — press OK to turn on"
                     !keysReady -> "On — waiting for the box…"
                     else -> "On"
                 }
             }, { if (keysOn) GOOD else BAD }),
             { openAccessibilitySettings() }
+        )
+
+        if (!overlayOk || !keysOn) {
+            addRow(
+                Row("status_recheck", "Check again", { "Re-reads both permissions" }, { MUTED })
+            ) { render() }
+        }
+        column.addView(spacer())
+    }
+
+    /**
+     * Does this APK actually declare KeyService? On some TV builds a service
+     * that is not declared is silently absent from the Accessibility list, so
+     * "the app is not in the list" has to be distinguishable from "it is off".
+     */
+    private fun keyServiceDeclared(): Boolean = try {
+        packageManager.queryIntentServices(
+            Intent("android.accessibilityservice.AccessibilityService"),
+            0
+        ).any {
+            it.serviceInfo.packageName == packageName &&
+                it.serviceInfo.name == KeyService::class.java.name
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    /**
+     * The two grants, from a PC. The box's own Settings can hide both pages
+     * ("no such setting", "no app in the list"); these commands do the same job
+     * without a menu, and appops is the documented way to allow drawing over
+     * other apps on Android TV.
+     */
+    private fun addAdbHelp() {
+        val overlayOk = Settings.canDrawOverlays(this)
+        val keysOk = AccessibilityState.isEnabled(this)
+        if (overlayOk && keysOk) return
+
+        section("IF THE MENU IS MISSING — FROM A PC")
+        if (!overlayOk) {
+            column.addView(
+                command("adb shell appops set $packageName SYSTEM_ALERT_WINDOW allow")
+            )
+        }
+        if (!keysOk) {
+            column.addView(
+                command("adb shell settings put secure accessibility_enabled 1")
+            )
+            column.addView(
+                command(
+                    "adb shell settings put secure enabled_accessibility_services " +
+                        "$packageName/.KeyService"
+                )
+            )
+        }
+        column.addView(
+            info("Reopen this app afterwards — these rows re-check themselves.", MUTED, 14f)
         )
         column.addView(spacer())
     }
@@ -252,6 +371,62 @@ class MainActivity : Activity() {
             { Settings.setFadeEnabled(this, it == 1) },
             { if (it == 1) "On" else "Off" }
         )
+        column.addView(spacer())
+    }
+
+    /**
+     * The power tests. Android gives a sideloaded app no direct power control:
+     * goToSleep() needs DEVICE_POWER and HDMI-CEC needs HDMI_CEC, both
+     * signature-level. So each mechanism is a button that reports what this box
+     * actually did, instead of one switch that pretends to always work.
+     */
+    private fun addPower() {
+        section("POWER   ·   TEST EACH ONE")
+        addRow(
+            Row("pwr_blackout", "Picture off / on", {
+                if (Settings.isBlackout(this)) "Off — any key restores it"
+                else "Press OK to black the picture out"
+            }, { if (Settings.isBlackout(this)) ACCENT else MUTED })
+        ) {
+            OverlayService.send(this, OverlayService.ACTION_TOGGLE_BLACKOUT)
+            handler.postDelayed({ render() }, 400)
+        }
+
+        addRow(
+            Row("pwr_menu", "Sleep (box power menu)", {
+                if (AccessibilityState.isEnabled(this)) "Opens the menu — choose Sleep"
+                else "Needs Remote keys — see CHECK"
+            }, { if (AccessibilityState.isEnabled(this)) GOOD else BAD })
+        ) {
+            toast(
+                if (KeyService.powerDialog()) "Choose Sleep — the TV follows if CEC is on"
+                else "Remote keys are off, so the menu cannot be opened"
+            )
+        }
+
+        addRow(
+            Row("pwr_cec_off", "Ask the TV to sleep (CEC)",
+                { "Reports what the box allows" }, { MUTED })
+        ) {
+            toast(
+                if (TvPowerLink.standbyTv(this)) "CEC standby was accepted"
+                else "CEC refused — this box only exposes it to system apps"
+            )
+        }
+
+        addRow(
+            Row("pwr_cec_on", "Ask the TV to wake (CEC)",
+                { "Reports what the box allows" }, { MUTED })
+        ) {
+            toast(
+                if (TvPowerLink.wakeTv(this, "test")) "CEC one-touch-play was accepted"
+                else "CEC refused — wake the box instead"
+            )
+        }
+
+        column.addView(info("From a PC, the same keys can be injected:", MUTED, 14f))
+        column.addView(command("adb shell input keyevent 177      # TV power"))
+        column.addView(command("adb shell input keyevent 26       # box sleep"))
         column.addView(spacer())
     }
 
@@ -381,14 +556,19 @@ class MainActivity : Activity() {
             isFocusable = true
             isFocusableInTouchMode = true
             isClickable = true
-            setPadding(dp(24), dp(15), dp(24), dp(15))
+            setPadding(dp(24), dp(12), dp(24), dp(12))
             background = this@MainActivity.getDrawable(R.drawable.row_background)
 
             titleView.text = rowTitle
             titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
             titleView.setTextColor(if (accentTitle) ACCENT else TEXT)
-            detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
             detailView.gravity = Gravity.END
+            // A crash message can be very long: two lines, then an ellipsis,
+            // so it can never push the row title out of the panel.
+            detailView.maxLines = 2
+            detailView.ellipsize = TextUtils.TruncateAt.END
+            detailView.maxWidth = dp(600)
 
             addView(
                 titleView,
@@ -460,6 +640,15 @@ class MainActivity : Activity() {
 
     private fun section(text: String) {
         column.addView(info(text, ACCENT, 15f, bold = true))
+    }
+
+    /** A copy-me command line: monospace, wrapping, no focus needed. */
+    private fun command(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setTextColor(TEXT)
+        typeface = Typeface.MONOSPACE
+        setPadding(dp(24), dp(4), dp(24), dp(4))
     }
 
     private fun info(
@@ -549,15 +738,27 @@ class MainActivity : Activity() {
         if (!openFirst(candidates)) toast("Open Settings → Apps → Special access")
     }
 
+    /**
+     * Our own service's toggle page first. That page is opened by component and
+     * does not depend on the general Accessibility list rendering us -- the
+     * list is exactly what comes up empty on some TV builds.
+     */
     private fun openAccessibilitySettings() {
-        val candidates = listOf(
-            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS),
-            Intent(
-                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:$packageName")
+        val candidates = mutableListOf<Intent>()
+        // The constant is hidden from the public SDK stubs, but Settings has
+        // handled this action since 8.0: it opens the toggle page for exactly
+        // one service, addressed by component, with no list involved.
+        candidates += Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
+            .putExtra(
+                "android.intent.extra.COMPONENT_NAME",
+                AccessibilityState.componentName(this)
             )
+        candidates += Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+        candidates += Intent(
+            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName")
         )
-        if (!openFirst(candidates)) toast("Open Settings → Device → Accessibility")
+        if (!openFirst(candidates)) toast("Settings → Device Preferences → Accessibility")
     }
 
     private fun openFirst(intents: List<Intent>): Boolean =
