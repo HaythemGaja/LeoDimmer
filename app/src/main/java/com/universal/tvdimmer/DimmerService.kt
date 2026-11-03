@@ -16,9 +16,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.widget.TextView
+import java.util.Calendar
 
 /**
  * The overlay owner (MidnightBeam-style click-through overlay + DimTV-style
@@ -32,6 +35,14 @@ import android.view.WindowManager
  *   adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_AMBIENT_LEVEL" --ei value [5-60]
  *   adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_SLEEP_TIMER" --ei value [0-120]
  *   adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "STOP"
+ * v1.4 additions (merged from local v1.2; v1.3 sleep light / timer / turn-off
+ * / TV power behaviour is otherwise unchanged):
+ *   --es action "SET_AMBIENT_COLOR" --es color "Red"  (Warm brown, Red, Amber,
+ *       Orange, Green, Blue, Violet, Pink)
+ *   --es action "RESET_IDLE"  (any remote key press; resets the idle timer)
+ * Presets, schedule, idle timer, fade, and on-screen readout are driven
+ * from the settings screen and the accessibility service, not new ADB verbs,
+ * except that SET_PERCENT already covers presets (75 / 50 / 25 / 0).
  *
  * SET_PERCENT sets *brightness* (100 = full bright, 0 = blackout), matching
  * the brightness_percent stored in prefs. STOP turns the dimmer off and clears
@@ -72,14 +83,13 @@ class DimmerService : Service() {
         const val ACTION_SET_AMBIENT_LEVEL = "SET_AMBIENT_LEVEL"
         const val ACTION_SET_SLEEP_TIMER = "SET_SLEEP_TIMER"
         const val ACTION_STOP = "STOP"
+        const val ACTION_SET_AMBIENT_COLOR = "SET_AMBIENT_COLOR"
+        const val ACTION_RESET_IDLE = "RESET_IDLE"
 
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "tv_dimmer"
         private const val REQUEST_OPEN_APP = 0
         private const val REQUEST_TURN_OFF = 1
-
-        /** Warm brown used by ambient (sleep light) mode instead of black. */
-        private val COLOR_AMBIENT = 0xFF2A1200.toInt()
 
         /** How long a blackout may last when no accessibility service can
          *  intercept a remote button to restore the picture. */
@@ -97,33 +107,81 @@ class DimmerService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var tintView: View? = null
+    private var osdView: TextView? = null
     private var tvPowerReceiver: BroadcastReceiver? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val blackoutGuard = Runnable { guardBlackout() }
     private val sleepTick = Runnable { onSleepTick() }
     private val sleepFade = Runnable { onSleepFadeStep() }
+    private val scheduleRunnable = object : Runnable {
+        override fun run() {
+            checkSchedule()
+            handler.postDelayed(this, 60_000)
+        }
+    }
+    private val idleRunnable = Runnable {
+        val idleMinutes = DimmerPrefs.getIdleMinutes(this)
+        if (idleMinutes > 0 && !DimmerPrefs.isBlackout(this) &&
+            System.currentTimeMillis() - lastActivityMs >= idleMinutes * 60_000L
+        ) {
+            // If the sleep light is on, exit it first: otherwise the
+            // overlay at alpha 1.0 would be a solid colour, not black.
+            if (DimmerPrefs.isAmbient(this)) {
+                cancelSleepTimer()
+                DimmerPrefs.setAmbientActive(this, false)
+                DimmerPrefs.setPreBlackout(this, DimmerPrefs.getAmbientLevel(this))
+            }
+            applyBrightness(0, animate = true, showOsd = false)
+            showOsd("Idle blackout — press any button to restore")
+        }
+    }
+    private val hideOsdRunnable = Runnable { osdView?.alpha = 0f }
+    private val generalFade = Runnable { onGeneralFadeStep() }
 
     /** -1 = no fade running; >= 0 = index of the fade step in flight. */
     private var sleepFadeStep = -1
     private var fadeFromAlpha = 0f
 
+    // General (v1.4) fade state: 6 steps x 50 ms = ~300 ms glide.
+    private var generalFadeFromAlpha = 0f
+    private var generalFadeTargetAlpha = 0f
+    private var generalFadeStep = -1
+    private var generalFadeShowOsd = true
+    private var lastActivityMs: Long = 0L
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        lastActivityMs = System.currentTimeMillis()
         // Fail-safe first: never come back up black or tinted.
         restoreSafeState()
         ensureOverlay()
         tvPowerReceiver = TvPowerLink.register(this)
+        handler.post(scheduleRunnable)
+        scheduleIdle()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        DimmerPrefs.prefs(this).edit().putBoolean(DimmerPrefs.KEY_SERVICE_ENABLED, true).apply()
-        ensureOverlay()
-
         val action = intent?.getStringExtra("action") ?: intent?.action
         val value = intent?.getIntExtra("value", -1) ?: -1
+        if (action == ACTION_RESET_IDLE) {
+            // Must not itself mark the service as "ever started": the
+            // accessibility service only sends it when that flag is set.
+            // Foreground first, so a lone reset delivered via
+            // startForegroundService cannot miss the foreground deadline.
+            startAsForeground()
+            resetIdle()
+            return START_STICKY
+        }
+        if (action != ACTION_STOP) {
+            DimmerPrefs.prefs(this).edit().putBoolean(DimmerPrefs.KEY_SERVICE_ENABLED, true).apply()
+        }
+        // Any service command is user activity for the idle timer.
+        resetIdle()
+        ensureOverlay()
+
         when (action) {
             ACTION_STOP -> {
                 // The service may have been started with startForegroundService,
@@ -147,12 +205,34 @@ class DimmerService : Service() {
                 DimmerPrefs.setAmbientLevel(this, value)
                 if (DimmerPrefs.isAmbient(this)) applyBrightness(value)
             }
+            ACTION_SET_AMBIENT_COLOR -> {
+                val name = intent?.getStringExtra("color") ?: ""
+                val index = DimmerPrefs.AMBIENT_COLORS.indexOfFirst {
+                    it.first.equals(name, ignoreCase = true)
+                }
+                if (index >= 0) {
+                    DimmerPrefs.prefs(this).edit()
+                        .putInt(DimmerPrefs.KEY_AMBIENT_COLOR_INDEX, index).apply()
+                    applyTint()
+                }
+            }
             ACTION_SET_SLEEP_TIMER -> {
                 DimmerPrefs.setSleepTimerMinutes(this, value.coerceAtLeast(0))
                 // A new duration applies from now to the light that is already on.
                 if (DimmerPrefs.isAmbient(this)) armSleepTimer() else cancelSleepTimer()
             }
-            else -> applyBrightness(DimmerPrefs.getBrightness(this))
+            else -> {
+                // Plain start (boot, settings open, accessibility connect):
+                // sync the stored state silently, then let the schedule and
+                // idle timers take over if they are configured.
+                checkSchedule(force = true)
+                applyBrightness(
+                    DimmerPrefs.getBrightness(this),
+                    animate = false,
+                    showOsd = false
+                )
+                scheduleIdle()
+            }
         }
         startAsForeground()
         return START_STICKY
@@ -162,18 +242,26 @@ class DimmerService : Service() {
         handler.removeCallbacks(blackoutGuard)
         handler.removeCallbacks(sleepTick)
         handler.removeCallbacks(sleepFade)
+        handler.removeCallbacks(scheduleRunnable)
+        handler.removeCallbacks(idleRunnable)
+        handler.removeCallbacks(hideOsdRunnable)
+        handler.removeCallbacks(generalFade)
         sleepFadeStep = -1
+        generalFadeStep = -1
         tvPowerReceiver?.let { TvPowerLink.unregister(this, it) }
         tvPowerReceiver = null
-        overlayView?.let { view ->
-            try {
-                windowManager?.removeView(view)
-            } catch (_: IllegalArgumentException) {
-                // Already removed; nothing to do.
+        listOf(overlayView, osdView).forEach { view ->
+            view?.let {
+                try {
+                    windowManager?.removeView(it)
+                } catch (_: IllegalArgumentException) {
+                    // Already removed; nothing to do.
+                }
             }
         }
         overlayView = null
         tintView = null
+        osdView = null
         super.onDestroy()
     }
 
@@ -205,20 +293,73 @@ class DimmerService : Service() {
             overlayView = view
             tintView = view.findViewById(R.id.overlay_dim_view)
             applyTint()
+            // v1.4 on-screen readout: a separate top layer, created once,
+            // hidden at alpha 0 until a change shows it for 2 seconds.
+            val osdParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = (80 * resources.displayMetrics.density).toInt()
+            }
+            val osd = TextView(this).apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+                setTextColor(0xFFFFD166.toInt())
+                setBackgroundColor(0xCC000000.toInt())
+                gravity = Gravity.CENTER
+                val pad = (24 * resources.displayMetrics.density).toInt()
+                setPadding(pad, pad / 2, pad, pad / 2)
+                alpha = 0f
+            }
+            windowManager?.addView(osd, osdParams)
+            osdView = osd
         } catch (_: SecurityException) {
             // Overlay permission was revoked between the check and the add.
             overlayView = null
             tintView = null
+            osdView = null
         } catch (_: WindowManager.BadTokenException) {
             overlayView = null
             tintView = null
+            osdView = null
         }
     }
 
-    /** Ambient mode is the same overlay with a warm tint instead of black. */
+    /** Ambient mode is the same overlay with a tint instead of black. */
     private fun applyTint() {
-        val color = if (DimmerPrefs.isAmbient(this)) COLOR_AMBIENT else Color.BLACK
+        val color = if (DimmerPrefs.isAmbient(this)) {
+            DimmerPrefs.ambientColorValue(this)
+        } else {
+            Color.BLACK
+        }
         tintView?.setBackgroundColor(color)
+    }
+
+    private fun showOsd(text: String) {
+        val osd = osdView ?: return
+        osd.text = text
+        osd.alpha = 1f
+        handler.removeCallbacks(hideOsdRunnable)
+        handler.postDelayed(hideOsdRunnable, 2000)
+    }
+
+    private fun showBrightnessOsd() {
+        // Blackout is audio-only by definition: no yellow popup on a
+        // black screen (worst at sleep time). The idle path shows its
+        // own explicit message via showOsd() and is unaffected.
+        if (DimmerPrefs.isBlackout(this)) return
+        when {
+            DimmerPrefs.isAmbient(this) -> showOsd(
+                "Sleep light ${DimmerPrefs.ambientColorName(this)} " +
+                    "${DimmerPrefs.getAmbientLevel(this)}%"
+            )
+            else -> showOsd("Brightness ${DimmerPrefs.getBrightness(this)}%")
+        }
     }
 
     /**
@@ -240,18 +381,124 @@ class DimmerService : Service() {
 
     // ---- Brightness state ----
 
-    private fun applyBrightness(percent: Int) {
+    /**
+     * v1.4: with animate = true (default) and fade enabled, the overlay
+     * alpha glides from its current value to the target over ~300 ms while
+     * the stored brightness is already the target, so an interrupted fade
+     * can never leave the stored state and the picture disagreeing. The
+     * sleep fade is a separate, longer animation and is never mixed with
+     * this one: a manual brightness change cancels it first.
+     */
+    private fun applyBrightness(
+        percent: Int,
+        animate: Boolean = true,
+        showOsd: Boolean = true
+    ) {
+        handler.removeCallbacks(generalFade)
+        generalFadeStep = -1
         val clamped = percent.coerceIn(0, 100)
         val previous = DimmerPrefs.getBrightness(this)
+        val oldAlpha = overlayView?.alpha
+            ?: DimmerPrefs.opacityFor(previous)
         // Remember the last non-black level so toggle / any-key exit restores it.
         if (previous > 0 && clamped == 0) DimmerPrefs.setPreBlackout(this, previous)
         DimmerPrefs.setBrightness(this, clamped)
         // A brightness change is a user action: it ends a fade in progress.
         cancelSleepFade()
-        // In-memory mutation only -- no re-inflate, no updateViewLayout.
-        overlayView?.alpha = DimmerPrefs.opacityFor(clamped)
         applyTint()
         updateBlackoutGuard(clamped)
+        val targetAlpha = DimmerPrefs.opacityFor(clamped)
+        if (animate && DimmerPrefs.isFadeEnabled(this) &&
+            sleepFadeStep < 0 && oldAlpha != targetAlpha
+        ) {
+            generalFadeFromAlpha = oldAlpha
+            generalFadeTargetAlpha = targetAlpha
+            generalFadeStep = 0
+            generalFadeShowOsd = showOsd
+            overlayView?.alpha = oldAlpha
+            handler.post(generalFade)
+            return
+        }
+        // In-memory mutation only -- no re-inflate, no updateViewLayout.
+        overlayView?.alpha = targetAlpha
+        if (showOsd) showBrightnessOsd()
+    }
+
+    private fun onGeneralFadeStep() {
+        generalFadeStep += 1
+        val view = overlayView
+        if (view == null || generalFadeStep >= 6) {
+            generalFadeStep = -1
+            view?.alpha = generalFadeTargetAlpha
+            if (generalFadeShowOsd) showBrightnessOsd()
+            return
+        }
+        val fraction = generalFadeStep.toFloat() / 6f
+        view.alpha = generalFadeFromAlpha +
+            (generalFadeTargetAlpha - generalFadeFromAlpha) * fraction
+        handler.postDelayed(generalFade, 50)
+    }
+
+    // ---- v1.4: schedule + idle ----
+
+    private fun checkSchedule(force: Boolean = false) {
+        if (!DimmerPrefs.isScheduleEnabled(this)) return
+        // The sleep light is a manual sleep mode: the schedule must not
+        // fight it, and blackout must not be exited by a schedule change.
+        // State is left untouched, so the next minute's check applies the
+        // schedule once the light is off / the picture is back.
+        if (DimmerPrefs.isAmbient(this) || DimmerPrefs.isBlackout(this)) return
+        val now = Calendar.getInstance()
+        val minutesNow = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        val dimStart = DimmerPrefs.getScheduleDimHour(this) * 60
+        val restoreStart = DimmerPrefs.getScheduleRestoreHour(this) * 60
+        val inWindow = if (dimStart <= restoreStart) {
+            minutesNow in dimStart until restoreStart
+        } else {
+            minutesNow >= dimStart || minutesNow < restoreStart
+        }
+        val state = DimmerPrefs.prefs(this).getInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0)
+        if (inWindow && (state != 1 || force)) {
+            // Store the pre-schedule level only on entry, so a forced
+            // re-apply (settings row changed mid-window) does not lose
+            // the restore level, and a manual brightness change during
+            // the window is not fought by the minute tick.
+            if (state != 1) {
+                DimmerPrefs.prefs(this).edit()
+                    .putInt(
+                        DimmerPrefs.KEY_SCHEDULE_PRE_BRIGHTNESS,
+                        DimmerPrefs.getBrightness(this)
+                    )
+                    .putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 1).apply()
+            }
+            applyBrightness(
+                DimmerPrefs.getScheduleDimPercent(this),
+                animate = true,
+                showOsd = false
+            )
+        } else if (!inWindow && state == 1) {
+            val restoreTo = DimmerPrefs.prefs(this)
+                .getInt(DimmerPrefs.KEY_SCHEDULE_PRE_BRIGHTNESS, 100)
+                .coerceIn(0, 100)
+            DimmerPrefs.prefs(this).edit()
+                .putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0).apply()
+            applyBrightness(restoreTo, animate = true, showOsd = false)
+        }
+    }
+
+    private fun resetIdle() {
+        lastActivityMs = System.currentTimeMillis()
+        DimmerPrefs.prefs(this).edit()
+            .putLong(DimmerPrefs.KEY_LAST_ACTIVITY_MS, lastActivityMs).apply()
+        scheduleIdle()
+    }
+
+    private fun scheduleIdle() {
+        handler.removeCallbacks(idleRunnable)
+        val idleMinutes = DimmerPrefs.getIdleMinutes(this)
+        if (idleMinutes > 0) {
+            handler.postDelayed(idleRunnable, idleMinutes * 60_000L)
+        }
     }
 
     private fun adjustBrightness(delta: Int) {
@@ -359,6 +606,8 @@ class DimmerService : Service() {
     }
 
     private fun startSleepFade() {
+        handler.removeCallbacks(generalFade)
+        generalFadeStep = -1
         handler.removeCallbacks(sleepTick)
         DimmerPrefs.setSleepTimerEnd(this, 0L)
         val view = overlayView
@@ -406,7 +655,8 @@ class DimmerService : Service() {
         val level = DimmerPrefs.getAmbientLevel(this)
         DimmerPrefs.setAmbientActive(this, false)
         DimmerPrefs.setPreBlackout(this, level)
-        applyBrightness(0)
+        // No popup at the end of a sleep fade: the user is meant to be asleep.
+        applyBrightness(0, animate = false, showOsd = false)
         startAsForeground()
     }
 
@@ -441,6 +691,11 @@ class DimmerService : Service() {
 
     private fun stopDimmer() {
         handler.removeCallbacks(blackoutGuard)
+        handler.removeCallbacks(scheduleRunnable)
+        handler.removeCallbacks(idleRunnable)
+        handler.removeCallbacks(hideOsdRunnable)
+        handler.removeCallbacks(generalFade)
+        generalFadeStep = -1
         cancelSleepTimer()
         DimmerPrefs.setAmbientActive(this, false)
         DimmerPrefs.setBrightness(this, 100)
@@ -448,6 +703,7 @@ class DimmerService : Service() {
             .putBoolean(DimmerPrefs.KEY_SERVICE_ENABLED, false)
             .apply()
         overlayView?.alpha = 0f
+        osdView?.alpha = 0f
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -476,10 +732,11 @@ class DimmerService : Service() {
                 }
             DimmerPrefs.isAmbient(this) -> {
                 val minutes = sleepTimerRemainingMinutes()
+                val color = DimmerPrefs.ambientColorName(this)
                 if (minutes > 0) {
-                    "Sleep light ${DimmerPrefs.getAmbientLevel(this)}% — fades out in $minutes min"
+                    "Sleep light $color ${DimmerPrefs.getAmbientLevel(this)}% — fades out in $minutes min"
                 } else {
-                    "Sleep light ${DimmerPrefs.getAmbientLevel(this)}% (warm)"
+                    "Sleep light $color ${DimmerPrefs.getAmbientLevel(this)}%"
                 }
             }
             else -> "Brightness $brightness%"

@@ -136,6 +136,18 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         private const val ID_STOP = 14L
         private const val ID_RESET_KEYS = 15L
         private const val ID_SLEEP_TIMER = 16L
+        // v1.4 merged rows (presets, sleep-light colour, schedule, idle, fade).
+        private const val ID_PRESET_75 = 17L
+        private const val ID_PRESET_50 = 18L
+        private const val ID_PRESET_25 = 19L
+        private const val ID_PRESET_BLACKOUT = 20L
+        private const val ID_AMBIENT_COLOR = 21L
+        private const val ID_SCHEDULE_TOGGLE = 22L
+        private const val ID_SCHEDULE_DIM_HOUR = 23L
+        private const val ID_SCHEDULE_RESTORE_HOUR = 24L
+        private const val ID_SCHEDULE_DIM_PERCENT = 25L
+        private const val ID_IDLE_TIMER = 26L
+        private const val ID_FADE_TOGGLE = 27L
 
         /** Sleep-light levels the settings row steps through. */
         private val AMBIENT_LEVELS = intArrayOf(10, 20, 30, 40, 50, 60)
@@ -152,13 +164,24 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
             if (AccessibilityState.isEnabled(ctx)) "enabled" else "MISSING"
         val state = when {
             DimmerPrefs.isBlackout(ctx) -> "blackout (audio-only)"
-            DimmerPrefs.isAmbient(ctx) -> "sleep light ${DimmerPrefs.getAmbientLevel(ctx)}% (warm)"
+            DimmerPrefs.isAmbient(ctx) -> "sleep light " +
+                "${DimmerPrefs.ambientColorName(ctx)} ${DimmerPrefs.getAmbientLevel(ctx)}%"
             else -> "normal"
+        }
+        val schedule = if (DimmerPrefs.isScheduleEnabled(ctx)) {
+            "Schedule: dim to ${DimmerPrefs.getScheduleDimPercent(ctx)}% at " +
+                "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleDimHour(ctx))}, " +
+                "restore at ${DimmerPrefs.formatHour(DimmerPrefs.getScheduleRestoreHour(ctx))}\n"
+        } else {
+            "Schedule: off\n"
         }
         // Each line is built separately: concatenating an if-expression with +
         // used to bind the whole tail to one branch and drop the status lines.
         val description = buildString {
             append("Brightness $brightness% — $state\n")
+            append(schedule)
+            append("Idle blackout: ${DimmerPrefs.timerLabel(DimmerPrefs.getIdleMinutes(ctx))}\n")
+            append("Smooth fade: ${if (DimmerPrefs.isFadeEnabled(ctx)) "on" else "off"}\n")
             append("Overlay permission: $overlay\n")
             append("Accessibility service: $accessibility\n")
             append("Map remote buttons below. Until you do, no key is intercepted.")
@@ -206,7 +229,7 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         actions += action(ID_TEST_TOGGLE, "Test: toggle blackout", "Switch blackout on / off now")
         actions += action(
             ID_TEST_AMBIENT, "Test: sleep light",
-            "Warm dim light for falling asleep — toggle on / off now"
+            "Dim light for falling asleep — toggle on / off now"
         )
         actions += action(
             ID_AMBIENT_LEVEL, "Sleep light level",
@@ -215,6 +238,39 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         actions += action(
             ID_SLEEP_TIMER, "Sleep timer",
             sleepTimerLabel(DimmerPrefs.getSleepTimerMinutes(ctx))
+        )
+        actions += action(ID_PRESET_75, "Preset: 75% brightness", "Jump straight to 75%")
+        actions += action(ID_PRESET_50, "Preset: 50% brightness", "Jump straight to 50%")
+        actions += action(ID_PRESET_25, "Preset: 25% brightness", "Jump straight to 25%")
+        actions += action(ID_PRESET_BLACKOUT, "Preset: blackout", "Jump straight to blackout")
+        actions += action(
+            ID_AMBIENT_COLOR, "Sleep light colour",
+            "${DimmerPrefs.ambientColorName(ctx)} — select for next colour"
+        )
+        actions += action(
+            ID_SCHEDULE_TOGGLE, "Night schedule",
+            if (DimmerPrefs.isScheduleEnabled(ctx)) "On — select to turn off" else "Off — select to turn on"
+        )
+        actions += action(
+            ID_SCHEDULE_DIM_HOUR, "Schedule: dim at",
+            "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleDimHour(ctx))} — select for next hour"
+        )
+        actions += action(
+            ID_SCHEDULE_RESTORE_HOUR, "Schedule: restore at",
+            "${DimmerPrefs.formatHour(DimmerPrefs.getScheduleRestoreHour(ctx))} — select for next hour"
+        )
+        actions += action(
+            ID_SCHEDULE_DIM_PERCENT, "Schedule: dim to",
+            "${DimmerPrefs.getScheduleDimPercent(ctx)}% — select for next level"
+        )
+        actions += action(
+            ID_IDLE_TIMER, "Idle blackout timer",
+            "${DimmerPrefs.timerLabel(DimmerPrefs.getIdleMinutes(ctx))} — " +
+                "select for next value (any key resets it)"
+        )
+        actions += action(
+            ID_FADE_TOGGLE, "Smooth fade",
+            if (DimmerPrefs.isFadeEnabled(ctx)) "On — select to turn off" else "Off — select to turn on"
         )
         actions += action(
             ID_PERM_OVERLAY, "Overlay permission",
@@ -244,6 +300,13 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
     override fun onGuidedActionClicked(action: GuidedAction) {
         val ctx = requireContext()
         val activity = host ?: return
+        val prefs = DimmerPrefs.prefs(ctx)
+        fun cycleInt(key: String, values: List<Int>, current: Int) {
+            val next = values[(values.indexOf(current) + 1).coerceAtLeast(0) % values.size]
+            prefs.edit().putInt(key, next).apply()
+            activity.startDimmerService(null, null)
+            activity.recreate()
+        }
         when (action.id) {
             ID_BRIGHTER_KEY -> showKeyDialog("Increase Brightness", DimmerPrefs.KEY_BRIGHTER)
             ID_DIMMER_KEY -> showKeyDialog("Decrease Brightness", DimmerPrefs.KEY_DIMMER)
@@ -273,6 +336,85 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
             ID_SLEEP_TIMER -> {
                 val next = nextSleepTimer(DimmerPrefs.getSleepTimerMinutes(ctx))
                 activity.startDimmerService(DimmerService.ACTION_SET_SLEEP_TIMER, next)
+                activity.recreate()
+            }
+            ID_PRESET_75 -> {
+                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 75)
+                activity.recreate()
+            }
+            ID_PRESET_50 -> {
+                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 50)
+                activity.recreate()
+            }
+            ID_PRESET_25 -> {
+                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 25)
+                activity.recreate()
+            }
+            ID_PRESET_BLACKOUT -> {
+                activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, 0)
+                activity.recreate()
+            }
+            ID_AMBIENT_COLOR -> {
+                val next = (DimmerPrefs.getAmbientColorIndex(ctx) + 1) %
+                    DimmerPrefs.AMBIENT_COLORS.size
+                prefs.edit().putInt(DimmerPrefs.KEY_AMBIENT_COLOR_INDEX, next).apply()
+                // Refresh the live tint immediately if the light is on.
+                if (DimmerPrefs.isAmbient(ctx)) {
+                    activity.startDimmerService(
+                        DimmerService.ACTION_SET_AMBIENT_LEVEL,
+                        DimmerPrefs.getAmbientLevel(ctx)
+                    )
+                }
+                activity.recreate()
+            }
+            ID_SCHEDULE_TOGGLE -> {
+                val turningOn = !DimmerPrefs.isScheduleEnabled(ctx)
+                val state = prefs.getInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0)
+                val edit = prefs.edit().putBoolean(
+                    DimmerPrefs.KEY_SCHEDULE_ENABLED, turningOn
+                )
+                if (!turningOn && state == 1 &&
+                    !DimmerPrefs.isAmbient(ctx) && !DimmerPrefs.isBlackout(ctx)
+                ) {
+                    // Turning the schedule off mid-window must restore
+                    // the picture now, not leave the dim in place.
+                    val restoreTo = prefs.getInt(
+                        DimmerPrefs.KEY_SCHEDULE_PRE_BRIGHTNESS, 100
+                    ).coerceIn(0, 100)
+                    edit.putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0).apply()
+                    activity.startDimmerService(DimmerService.ACTION_SET_PERCENT, restoreTo)
+                } else {
+                    if (!turningOn) edit.putInt(DimmerPrefs.KEY_SCHEDULE_STATE, 0)
+                    edit.apply()
+                    activity.startDimmerService(null, null)
+                }
+                activity.recreate()
+            }
+            ID_SCHEDULE_DIM_HOUR -> cycleInt(
+                DimmerPrefs.KEY_SCHEDULE_DIM_HOUR,
+                DimmerPrefs.SCHEDULE_DIM_HOURS,
+                DimmerPrefs.getScheduleDimHour(ctx)
+            )
+            ID_SCHEDULE_RESTORE_HOUR -> cycleInt(
+                DimmerPrefs.KEY_SCHEDULE_RESTORE_HOUR,
+                DimmerPrefs.SCHEDULE_RESTORE_HOURS,
+                DimmerPrefs.getScheduleRestoreHour(ctx)
+            )
+            ID_SCHEDULE_DIM_PERCENT -> cycleInt(
+                DimmerPrefs.KEY_SCHEDULE_DIM_PERCENT,
+                DimmerPrefs.SCHEDULE_DIM_PERCENTS,
+                DimmerPrefs.getScheduleDimPercent(ctx)
+            )
+            ID_IDLE_TIMER -> cycleInt(
+                DimmerPrefs.KEY_IDLE_MINUTES,
+                DimmerPrefs.IDLE_MINUTES_OPTIONS,
+                DimmerPrefs.getIdleMinutes(ctx)
+            )
+            ID_FADE_TOGGLE -> {
+                prefs.edit().putBoolean(
+                    DimmerPrefs.KEY_FADE_ENABLED,
+                    !DimmerPrefs.isFadeEnabled(ctx)
+                ).apply()
                 activity.recreate()
             }
             ID_PERM_OVERLAY -> activity.openOverlaySettings()

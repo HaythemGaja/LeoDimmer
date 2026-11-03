@@ -5,12 +5,16 @@
 # the canonical Android Studio build -- this script produces the same
 # debug APK from the same sources, including the Leanback library resources.
 # Usage: ./build-manual-apk.sh [output-apk]
-# Default output: /tmp/tvdimmer-build/LeoDimmer-v1.1.apk
+# Default output: /tmp/tvdimmer-build/LeoDimmer-v1.4.apk
 # The debug keystore lives OUTSIDE the repo at
 # ~/workspace/.keystores/tvdimmer-debug.keystore (never committed).
 set -e
 cd "$(dirname "$0")"
-OUT_APK="${1:-/tmp/tvdimmer-build/LeoDimmer-v1.1.apk}"
+OUT_APK="${1:-/tmp/tvdimmer-build/LeoDimmer-v1.4.apk}"
+# Version from app/build.gradle.kts, read here (before any cd) so the
+# aapt2 link step below uses the Gradle version, not a stale hardcode.
+VC=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+VN=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
 BT="$HOME/workspace/android-build/sdk/build-tools/34.0.0"
 PLAT="$HOME/workspace/android-build/sdk/platforms/android-34/android.jar"
 KOTLINC="$HOME/workspace/android-build/kotlin-1.9.24/bin/kotlinc"
@@ -63,6 +67,9 @@ for aar in libs/*.aar; do
 done
 
 # ---- aapt2 link ----
+# Version comes from app/build.gradle.kts (see the VC/VN read at the top
+# of this script): a stale hardcoded code would make the APK look like an
+# old version and refuse to update a newer install.
 sed 's|<manifest |<manifest package="com.universal.tvdimmer" |' "$SRC/AndroidManifest.xml" > "$OUT/AndroidManifest.xml"
 # shellcheck disable=SC2086
 "$BT/aapt2" link -o "$OUT/base.apk" \
@@ -73,8 +80,8 @@ sed 's|<manifest |<manifest package="com.universal.tvdimmer" |' "$SRC/AndroidMan
   "$OUT"/compiled/*.zip \
   --min-sdk-version 28 \
   --target-sdk-version 34 \
-  --version-code 2 \
-  --version-name 1.1
+  --version-code "$VC" \
+  --version-name "$VN"
 
 # ---- javac (R.java for app + libraries) + kotlinc ----
 find "$OUT/gen" -name "*.java" > "$OUT/sources-java.txt"

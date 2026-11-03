@@ -104,6 +104,8 @@ adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "TOGGLE_AMBIENT"
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_AMBIENT_LEVEL" --ei value [5-60]
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_SLEEP_TIMER" --ei value [0-120]
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "SET_AMBIENT_COLOR" --es color "Red"
+adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "RESET_IDLE"
 adb shell am startservice -n com.universal.tvdimmer/.DimmerService --es action "STOP"
 ```
 
@@ -155,6 +157,23 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.4** — merge of the parallel local v1.2 feature set into v1.3, with
+  no change to v1.3's sleep light, sleep timer, turn-off, or TV power link:
+  night schedule (dim at 20–0, restore at 6–9, dim to 10/20/30/50%, applied
+  on window transitions and on plain service starts (boot / settings open),
+  skipped while the sleep light or blackout is active, and never fighting
+  a manual brightness change mid-window; turning it off mid-window
+  restores the pre-schedule level at once);
+  presets 75 / 50 / 25 / blackout; on-screen brightness readout for 2 s;
+  smooth fade (~300 ms) for manual brightness changes, off-able, never
+  mixed with the 20 s sleep fade; idle blackout timer (off / 15 / 30 /
+  60 min, any key resets it); long-press (hold Increase → 100%, Decrease →
+  blackout, Toggle → sleep light, Sleep light → 100%) and double-press
+  (Increase → 75%, Decrease → 25%, Toggle → 100%, Sleep light → 50%);
+  sleep-light colour choice (Warm brown — the v1.3 default — Red, Amber,
+  Orange, Green, Blue, Violet, Pink) with the existing level as intensity
+  control and the existing sleep timer. New ADB actions: `SET_AMBIENT_COLOR`
+  (by colour name), `RESET_IDLE`.
 - **v1.3** — sleep timer for the sleep light: selectable duration (off /
   10 / 15 / 20 / 30 / 45 / 60 min), countdown in the ongoing notification,
   20-second fade to black on expiry, any key during the fade cancels it, and
