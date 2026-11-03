@@ -71,6 +71,45 @@ object DimmerPrefs {
         prefs(context).edit().putBoolean(KEY_CAPTURING, capturing).apply()
     }
 
+    // ---- v1.9 moods ----
+    // A TV remote has no spare buttons, so the whole dimmer is three states
+    // on ONE key: Day -> Night -> Sleep -> Day. Each mood keeps its own
+    // settings (Day/Night brightness, Sleep colour + level + auto-off).
+    const val KEY_MOOD = "mood" // 0 = Day, 1 = Night, 2 = Sleep
+    const val KEY_MODE_KEY = "key_mode"
+    const val KEY_DAY_BRIGHTNESS = "day_brightness_percent"
+    const val KEY_NIGHT_BRIGHTNESS = "night_brightness_percent"
+
+    const val MOOD_DAY = 0
+    const val MOOD_NIGHT = 1
+    const val MOOD_SLEEP = 2
+
+    val MOODS = listOf(MOOD_DAY, MOOD_NIGHT, MOOD_SLEEP)
+    val DAY_BRIGHTNESS_OPTIONS = listOf(100, 90, 80, 70)
+    val NIGHT_BRIGHTNESS_OPTIONS = listOf(10, 15, 20, 25, 30, 40, 50)
+
+    fun getMood(context: Context): Int =
+        prefs(context).getInt(KEY_MOOD, MOOD_DAY).coerceIn(MOOD_DAY, MOOD_SLEEP)
+
+    fun setMood(context: Context, mood: Int) {
+        prefs(context).edit().putInt(KEY_MOOD, mood.coerceIn(MOOD_DAY, MOOD_SLEEP)).apply()
+    }
+
+    /** Day -> Night -> Sleep -> Day. */
+    fun nextMood(mood: Int): Int = (mood + 1) % MOODS.size
+
+    fun moodName(mood: Int): String = when (mood) {
+        MOOD_NIGHT -> "Night"
+        MOOD_SLEEP -> "Sleep"
+        else -> "Day"
+    }
+
+    fun getDayBrightness(context: Context): Int =
+        prefs(context).getInt(KEY_DAY_BRIGHTNESS, 100).coerceIn(0, 100)
+
+    fun getNightBrightness(context: Context): Int =
+        prefs(context).getInt(KEY_NIGHT_BRIGHTNESS, 25).coerceIn(0, 100)
+
     /** Sleep-light colours. Warm brown first = the v1.3 default, unchanged. */
     val AMBIENT_COLORS = listOf(
         "Warm brown" to 0xFF2A1200.toInt(),
@@ -122,6 +161,7 @@ object DimmerPrefs {
             .putInt(KEY_DIMMER, UNSET)
             .putInt(KEY_TOGGLE, UNSET)
             .putInt(KEY_AMBIENT, UNSET)
+            .putInt(KEY_MODE_KEY, UNSET)
             .apply()
     }
 

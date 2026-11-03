@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
 import androidx.fragment.app.FragmentActivity
 import androidx.leanback.app.GuidedStepSupportFragment
 import androidx.leanback.widget.GuidanceStylist
@@ -43,9 +44,17 @@ class MainActivity : FragmentActivity() {
     private var lastOverlayGranted: Boolean? = null
     private var lastAccessibilityEnabled: Boolean? = null
 
+    /** Callback for the remote button being captured, if any (see startKeyCapture). */
+    private var keyCapture: ((keyCode: Int) -> Unit)? = null
+    private var keyDialog: KeyListeningDialog? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashLogger()
+        // A capture cannot survive an activity. If the app was killed while the
+        // dialog was open, this flag stays set, and the accessibility service
+        // would then pass every mapped button straight through for ever.
+        DimmerPrefs.setCapturingKey(this, false)
         setContentView(R.layout.activity_main)
         lastOverlayGranted = Settings.canDrawOverlays(this)
         lastAccessibilityEnabled = AccessibilityState.isEnabled(this)
@@ -132,6 +141,61 @@ class MainActivity : FragmentActivity() {
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
     }
 
+    /**
+     * Capture the next remote button in the activity itself.
+     *
+     * v1.6 captured inside a focusable Dialog. That works on an emulator but
+     * not reliably on the Mi Box: when the dialog's window never takes focus
+     * (the GuidedStep underneath can keep it on vendor TV builds) the presses
+     * go to the activity instead, so no button was ever registered -- the
+     * reported "does not register the button when pressed". The dialog is now
+     * purely visual and not focusable, and the activity captures in
+     * dispatchKeyEvent, so there is exactly one place a key can arrive.
+     */
+    fun startKeyCapture(actionLabel: String, prefsKey: String) {
+        endKeyCapture()
+        DimmerPrefs.setCapturingKey(this, true)
+        keyCapture = { keyCode ->
+            DimmerPrefs.setKey(this, prefsKey, keyCode)
+            // Rebuild the GuidedStep so the new keycode shows in the row.
+            recreate()
+        }
+        keyDialog = KeyListeningDialog(this, actionLabel).also { dialog ->
+            dialog.setOnDismissListener { endKeyCapture() }
+            dialog.show()
+        }
+    }
+
+    fun endKeyCapture() {
+        keyCapture = null
+        DimmerPrefs.setCapturingKey(this, false)
+        // Cleared before dismiss(): the dismiss listener calls back in here.
+        val dialog = keyDialog
+        keyDialog = null
+        dialog?.dismiss()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val capture = keyCapture ?: return super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_UP) return true
+        if (event.action != KeyEvent.ACTION_DOWN) {
+            return super.dispatchKeyEvent(event)
+        }
+        val keyCode = event.keyCode
+        endKeyCapture()
+        // BACK cancels and is therefore never itself mappable.
+        if (keyCode != KeyEvent.KEYCODE_BACK) capture(keyCode)
+        return true
+    }
+
+    override fun onDestroy() {
+        // Do not dismiss here: the window is already going away.
+        keyCapture = null
+        keyDialog = null
+        DimmerPrefs.setCapturingKey(this, false)
+        super.onDestroy()
+    }
+
     fun isAccessibilityEnabled(): Boolean = AccessibilityState.isEnabled(this)
 
     /**
@@ -183,13 +247,38 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * The Mi Box's Android 9 build does not always resolve the per-app
+     * overlay page, which is why the overlay grant was impossible to find:
+     * "Open settings" did nothing. Fall back down the chain instead of
+     * leaving the user with no page at all -- the global overlay page, then
+     * this app's own info page, where Xiaomi hides "Display over other apps"
+     * under Special access / Permissions.
+     */
     fun openOverlaySettings() {
-        startActivity(
+        val candidates = listOf(
             Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")
+            ),
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName")
             )
         )
+        candidates.any { startIfResolvable(it) }
+    }
+
+    private fun startIfResolvable(intent: Intent): Boolean {
+        if (intent.resolveActivity(packageManager) == null) return false
+        return try {
+            startActivity(intent)
+            true
+        } catch (_: Exception) {
+            // A vendor build can resolve but still refuse it; try the next one.
+            false
+        }
     }
 
     fun openAccessibilitySettings() {
@@ -234,6 +323,11 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         private const val ID_SCHEDULE_DIM_PERCENT = 25L
         private const val ID_IDLE_TIMER = 26L
         private const val ID_FADE_TOGGLE = 27L
+        // v1.9 moods: three states on one key (Day / Night / Sleep).
+        private const val ID_MOOD_CYCLE = 28L
+        private const val ID_DAY_BRIGHTNESS = 29L
+        private const val ID_NIGHT_BRIGHTNESS = 30L
+        private const val ID_MODE_KEY = 31L
 
         /** Sleep-light levels the settings row steps through. */
         private val AMBIENT_LEVELS = intArrayOf(10, 20, 30, 40, 50, 60)
@@ -265,7 +359,10 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         // used to bind the whole tail to one branch and drop the status lines.
         val crash = host?.lastCrashLine()
         val description = buildString {
-            append("Brightness $brightness% — $state\n")
+            append(
+                "Mode: ${DimmerPrefs.moodName(DimmerPrefs.getMood(ctx))} — " +
+                    "brightness $brightness% — $state\n"
+            )
             append(schedule)
             append("Idle blackout: ${DimmerPrefs.timerLabel(DimmerPrefs.getIdleMinutes(ctx))}\n")
             append("Smooth fade: ${if (DimmerPrefs.isFadeEnabled(ctx)) "on" else "off"}\n")
@@ -274,7 +371,10 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
             if (crash != null) {
                 append("Last crash on this box: $crash\n")
             }
-            append("Map remote buttons below. Until you do, no key is intercepted.")
+            append(
+                "One remote button is enough: map the Mode key and press it to " +
+                    "cycle Day → Night → Sleep. The other keys are optional."
+            )
         }
         return GuidanceStylist.Guidance(
             "LeoDimmer",
@@ -308,20 +408,41 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
                 .checked(checked)
                 .build()
 
+        val mood = DimmerPrefs.getMood(ctx)
+        val nextMood = DimmerPrefs.nextMood(mood)
         actions += action(
-            ID_BRIGHTER_KEY, "Increase brightness key",
+            ID_MOOD_CYCLE, "Mode: ${DimmerPrefs.moodName(mood)}",
+            "Select to switch to ${DimmerPrefs.moodName(nextMood)}"
+        )
+        actions += action(
+            ID_DAY_BRIGHTNESS, "Day mode brightness",
+            "${DimmerPrefs.getDayBrightness(ctx)}% — select to step 100 / 90 / 80 / 70%"
+        )
+        actions += action(
+            ID_NIGHT_BRIGHTNESS, "Night mode brightness",
+            "${DimmerPrefs.getNightBrightness(ctx)}% — " +
+                "select to step 10 / 15 / 20 / 25 / 30 / 40 / 50%"
+        )
+        // One button for everything: this is the only mapping a short remote
+        // needs. Mapped first so it is the top row of the key section.
+        actions += action(
+            ID_MODE_KEY, "Mode key (Day / Night / Sleep)",
+            DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_MODE_KEY)
+        )
+        actions += action(
+            ID_BRIGHTER_KEY, "Optional: increase brightness key",
             DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_BRIGHTER)
         )
         actions += action(
-            ID_DIMMER_KEY, "Decrease brightness key",
+            ID_DIMMER_KEY, "Optional: decrease brightness key",
             DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_DIMMER)
         )
         actions += action(
-            ID_TOGGLE_KEY, "Toggle blackout key",
+            ID_TOGGLE_KEY, "Optional: toggle blackout key",
             DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_TOGGLE)
         )
         actions += action(
-            ID_AMBIENT_KEY, "Sleep light key",
+            ID_AMBIENT_KEY, "Optional: sleep light key",
             DimmerPrefs.keyLabel(ctx, DimmerPrefs.KEY_AMBIENT)
         )
         actions += action(ID_TEST_BRIGHTER, "Test: brighter", "Step brightness up by 10% now")
@@ -377,7 +498,12 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         )
         actions += action(
             ID_PERM_OVERLAY, "Overlay permission",
-            if (Settings.canDrawOverlays(ctx)) "Granted" else "Missing — select to open system settings"
+            if (Settings.canDrawOverlays(ctx)) {
+                "Granted — nothing dims without it"
+            } else {
+                "Missing — select to open it: Settings → Apps → Special access → " +
+                    "Display over other apps → LeoDimmer → Allow"
+            }
         )
         actions += action(
             ID_PERM_ACCESSIBILITY, "Accessibility service",
@@ -520,6 +646,36 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
                 ).apply()
                 activity.recreate()
             }
+            ID_MOOD_CYCLE -> {
+                val next = DimmerPrefs.nextMood(DimmerPrefs.getMood(ctx))
+                activity.startDimmerService(DimmerService.ACTION_SET_MOOD, next)
+                activity.recreate()
+            }
+            ID_DAY_BRIGHTNESS -> {
+                val next = nextIn(
+                    DimmerPrefs.DAY_BRIGHTNESS_OPTIONS,
+                    DimmerPrefs.getDayBrightness(ctx)
+                )
+                prefs.edit().putInt(DimmerPrefs.KEY_DAY_BRIGHTNESS, next).apply()
+                // Only re-apply if Day is the mode in use; otherwise the new
+                // level simply waits for the next Day press.
+                if (DimmerPrefs.getMood(ctx) == DimmerPrefs.MOOD_DAY) {
+                    activity.startDimmerService(DimmerService.ACTION_SET_MOOD, DimmerPrefs.MOOD_DAY)
+                }
+                activity.recreate()
+            }
+            ID_NIGHT_BRIGHTNESS -> {
+                val next = nextIn(
+                    DimmerPrefs.NIGHT_BRIGHTNESS_OPTIONS,
+                    DimmerPrefs.getNightBrightness(ctx)
+                )
+                prefs.edit().putInt(DimmerPrefs.KEY_NIGHT_BRIGHTNESS, next).apply()
+                if (DimmerPrefs.getMood(ctx) == DimmerPrefs.MOOD_NIGHT) {
+                    activity.startDimmerService(DimmerService.ACTION_SET_MOOD, DimmerPrefs.MOOD_NIGHT)
+                }
+                activity.recreate()
+            }
+            ID_MODE_KEY -> showKeyDialog("Cycle Day / Night / Sleep", DimmerPrefs.KEY_MODE_KEY)
             ID_PERM_OVERLAY -> activity.openOverlaySettings()
             ID_PERM_ACCESSIBILITY -> activity.openAccessibilitySettings()
             ID_TV_POWER_ON -> {
@@ -542,6 +698,10 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         }
     }
 
+    /** Step through a fixed option list, wrapping back to the first entry. */
+    private fun nextIn(values: List<Int>, current: Int): Int =
+        values[(values.indexOf(current) + 1) % values.size]
+
     private fun nextAmbientLevel(current: Int): Int =
         AMBIENT_LEVELS.firstOrNull { it > current } ?: AMBIENT_LEVELS.first()
 
@@ -559,16 +719,7 @@ class DimmerSettingsFragment : GuidedStepSupportFragment() {
         }
 
     private fun showKeyDialog(actionLabel: String, prefsKey: String) {
-        val ctx = requireContext()
-        val activity = host ?: return
-        DimmerPrefs.setCapturingKey(ctx, true)
-        val dialog = KeyListeningDialog(ctx, actionLabel) { keyCode ->
-            DimmerPrefs.setCapturingKey(ctx, false)
-            DimmerPrefs.setKey(ctx, prefsKey, keyCode)
-            // Rebuild the GuidedStep so the new keycode shows in the row.
-            activity.recreate()
-        }
-        dialog.setOnDismissListener { DimmerPrefs.setCapturingKey(ctx, false) }
-        dialog.show()
+        // The activity owns the capture: it is the window that keeps focus.
+        host?.startKeyCapture(actionLabel, prefsKey)
     }
 }

@@ -86,6 +86,9 @@ class DimmerService : Service() {
         const val ACTION_STOP = "STOP"
         const val ACTION_SET_AMBIENT_COLOR = "SET_AMBIENT_COLOR"
         const val ACTION_RESET_IDLE = "RESET_IDLE"
+        // v1.9 moods: Day / Night / Sleep, cycled from one remote button.
+        const val ACTION_CYCLE_MOOD = "CYCLE_MOOD"
+        const val ACTION_SET_MOOD = "SET_MOOD"
 
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "tv_dimmer"
@@ -228,6 +231,10 @@ class DimmerService : Service() {
                 DimmerPrefs.setSleepTimerMinutes(this, value.coerceAtLeast(0))
                 // A new duration applies from now to the light that is already on.
                 if (DimmerPrefs.isAmbient(this)) armSleepTimer() else cancelSleepTimer()
+            }
+            ACTION_CYCLE_MOOD -> applyMood(DimmerPrefs.nextMood(DimmerPrefs.getMood(this)))
+            ACTION_SET_MOOD -> if (value in DimmerPrefs.MOOD_DAY..DimmerPrefs.MOOD_SLEEP) {
+                applyMood(value)
             }
             else -> {
                 // Plain start (boot, settings open, accessibility connect):
@@ -508,6 +515,42 @@ class DimmerService : Service() {
         }
     }
 
+    /**
+     * v1.9 moods: one button, three states, each with its own settings.
+     *
+     * Day   - bright picture (Day brightness), sleep light and timer off.
+     * Night - the picture dimmed to Night brightness, timer off.
+     * Sleep - the sleep light: its colour, its level, and the sleep timer
+     *         fading it out to black.
+     *
+     * The mood is stored so the settings screen and the notification can name
+     * it; the brightness/ambient state stays the single source of truth for
+     * what is actually drawn, exactly as before.
+     */
+    private fun applyMood(mood: Int) {
+        DimmerPrefs.setMood(this, mood)
+        when (mood) {
+            DimmerPrefs.MOOD_SLEEP -> {
+                // Re-entering Sleep while the light is already on just
+                // re-arms the timer instead of restacking the overlay.
+                if (DimmerPrefs.isAmbient(this)) armSleepTimer() else enterAmbient()
+            }
+            DimmerPrefs.MOOD_NIGHT -> {
+                cancelSleepTimer()
+                DimmerPrefs.setAmbientActive(this, false)
+                applyBrightness(DimmerPrefs.getNightBrightness(this))
+                showOsd("Night")
+            }
+            else -> {
+                cancelSleepTimer()
+                DimmerPrefs.setAmbientActive(this, false)
+                applyBrightness(DimmerPrefs.getDayBrightness(this))
+                showOsd("Day")
+            }
+        }
+        startAsForeground()
+    }
+
     private fun adjustBrightness(delta: Int) {
         if (DimmerPrefs.isAmbient(this)) {
             // While the sleep light is on, the step keys sculpt the light
@@ -746,7 +789,8 @@ class DimmerService : Service() {
                     "Sleep light $color ${DimmerPrefs.getAmbientLevel(this)}%"
                 }
             }
-            else -> "Brightness $brightness%"
+            else -> "${DimmerPrefs.moodName(DimmerPrefs.getMood(this))} mode — " +
+                "brightness $brightness%"
         }
         val openIntent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(

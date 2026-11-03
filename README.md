@@ -157,6 +157,28 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.9** — three moods on one remote button. A TV remote has no spare
+  button per setting, so the dimmer is now three states — **Day → Night →
+  Sleep → Day** — each with its own settings: Day brightness (100 / 90 /
+  80 / 70%), Night brightness (10 … 50%), and Sleep's colour, level and
+  auto-off timer. Mapping one key ("Mode key (Day / Night / Sleep)") is
+  enough; the original four mappings remain but are now optional. The
+  overlay permission also could not be granted on the Mi Box because its
+  Android 9 build does not always resolve the per-app overlay page, so
+  "Open settings" did nothing: it now falls back to the global overlay
+  page and then to this app's info page, and the row spells out the menu
+  path (Settings → Apps → Special access → Display over other apps).
+- **v1.8** — remote-button capture no longer depends on window focus.
+  v1.6 captured inside a focusable Dialog; on the Mi Box that dialog does
+  not reliably take focus over a GuidedStep, so the presses went to the
+  activity and no button was ever registered — exactly the "does not
+  register the button when pressed" report. The dialog is now purely
+  visual and `FLAG_NOT_FOCUSABLE`, and `MainActivity.dispatchKeyEvent`
+  captures the next press, so there is one capture path and it always has
+  the window. BACK still cancels and is never mappable. The
+  `capturing_key` flag is now also cleared on activity create and destroy,
+  so being killed mid-capture can no longer leave the accessibility
+  service passing every mapped button straight through for ever.
 - **v1.7** — first-open permission prompt: until v1.6 the app never
   asked for anything on first open, it only listed "Overlay permission"
   and "Accessibility service" rows to tap. Now it prompts on open,

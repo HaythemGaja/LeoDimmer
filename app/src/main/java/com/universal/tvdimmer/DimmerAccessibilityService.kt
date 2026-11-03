@@ -99,7 +99,21 @@ class DimmerAccessibilityService : AccessibilityService() {
             return canDraw
         }
 
-        if (!canDraw || !isMappedKey(keyCode)) return false
+        if (!canDraw) return false
+
+        // v1.9: the Mode key is the whole dimmer on one button -- Day ->
+        // Night -> Sleep -> Day. Handled before the long/double-press logic
+        // (one press, one mood change) and holding the key is consumed but
+        // not repeated, so it cannot race through the moods.
+        val modeKey = DimmerPrefs.getKey(this, DimmerPrefs.KEY_MODE_KEY)
+        if (modeKey != DimmerPrefs.UNSET && keyCode == modeKey) {
+            if (event.repeatCount == 0) {
+                startDimmerService(DimmerService.ACTION_CYCLE_MOOD, null)
+            }
+            return true
+        }
+
+        if (!isMappedKey(keyCode)) return false
 
         // Rule 2: hold -> long-press action, once per hold.
         if (event.repeatCount > 0) {
@@ -170,7 +184,8 @@ class DimmerAccessibilityService : AccessibilityService() {
 
     private fun isMappedKey(keyCode: Int): Boolean {
         if (keyCode == DimmerPrefs.UNSET) return false
-        return keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_BRIGHTER) ||
+        return keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_MODE_KEY) ||
+            keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_BRIGHTER) ||
             keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_DIMMER) ||
             keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_TOGGLE) ||
             keyCode == DimmerPrefs.getKey(this, DimmerPrefs.KEY_AMBIENT)
