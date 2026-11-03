@@ -1,6 +1,7 @@
 package com.universal.tvdimmer
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -19,11 +20,14 @@ import androidx.leanback.widget.GuidedAction
  * full-screen, D-pad navigable, 10-foot type). On first run all mappings are
  * unset and both permissions are shown as missing until granted.
  *
- * Onboarding: if SYSTEM_ALERT_WINDOW or the accessibility service is
- * missing, the corresponding row opens the system settings page directly
- * (ACTION_MANAGE_OVERLAY_PERMISSION for this app, ACTION_ACCESSIBILITY_SETTINGS
- * for the service). When the user returns, onResume notices the state changed
- * and rebuilds the screen so the rows flip to "Granted" without relaunching.
+ * Onboarding: on first open the app asks for the permissions it needs,
+ * one at a time, overlay first then accessibility (see
+ * promptForMissingPermissions). Android does not allow a simple
+ * Allow/Deny popup for either of these: both must be granted on a system
+ * settings page, so the prompt opens that page. The settings rows remain
+ * as a manual grant path. When the user returns, onResume notices the
+ * state changed and rebuilds the screen so the rows flip to "Granted"
+ * without relaunching.
  *
  * Note on the Mi Box: Xiaomi's overlay page is reached through the same
  * ACTION_MANAGE_OVERLAY_PERMISSION intent; there is no separate hidden page
@@ -53,6 +57,49 @@ class MainActivity : FragmentActivity() {
             supportFragmentManager.beginTransaction()
                 .replace(R.id.container, DimmerSettingsFragment())
                 .commit()
+        }
+        // Ask, don't just list rows: until v1.6 the app never prompted
+        // for either permission on first open, so a new user could try
+        // presets and key mapping with nothing granted and no idea why
+        // nothing worked. Overlay first; on return with overlay granted
+        // (which recreates this activity) the accessibility prompt follows.
+        // Dismissing with Later does not re-prompt in the same session:
+        // a new prompt only appears on a fresh activity creation.
+        // Posted, not shown directly, so the dialog attaches to a window
+        // that is already resumed (avoids a BadToken on some boxes).
+        window?.decorView?.post { promptForMissingPermissions() }
+    }
+
+    private fun promptForMissingPermissions() {
+        if (!Settings.canDrawOverlays(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("LeoDimmer needs overlay permission")
+                .setMessage(
+                    "LeoDimmer dims the screen with an overlay above " +
+                        "other apps. Without \"Display over other apps\" " +
+                        "it cannot dim anything. Open settings and allow " +
+                        "it for LeoDimmer."
+                )
+                .setPositiveButton("Open settings") { _, _ -> openOverlaySettings() }
+                .setNegativeButton("Later", null)
+                .setCancelable(true)
+                .show()
+            return
+        }
+        if (!AccessibilityState.isEnabled(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("LeoDimmer needs the accessibility service")
+                .setMessage(
+                    "Global remote buttons only work through the " +
+                        "accessibility service. Open Accessibility " +
+                        "settings, find LeoDimmer, and turn it on. " +
+                        "Without it, dimming from this settings screen " +
+                        "still works, but remote buttons will not."
+                )
+                .setPositiveButton("Open settings") { _, _ -> openAccessibilitySettings() }
+                .setNegativeButton("Later", null)
+                .setCancelable(true)
+                .show()
         }
     }
 

@@ -157,6 +157,16 @@ Requirements: Android SDK with platform 34, JDK 17, Gradle 8.5 (via wrapper).
 
 ## Version notes
 
+- **v1.7** — first-open permission prompt: until v1.6 the app never
+  asked for anything on first open, it only listed "Overlay permission"
+  and "Accessibility service" rows to tap. Now it prompts on open,
+  overlay first, then accessibility on return with overlay granted
+  (Android allows no simple Allow/Deny popup for either: both must be
+  granted on a system settings page, so the prompt opens that page;
+  "Later" dismisses without re-prompting in the same session). No
+  behaviour change otherwise. Note: the notification permission is
+  Android 13+ only, so on the Android 9 Mi Box the app correctly
+  never asks for it.
 - **v1.6** — key capture + preset-crash hardening (no single definite
   crash was found in the preset handlers, so every unguarded first-start
   path was fixed and a crash log was added): key-capture dialog now
