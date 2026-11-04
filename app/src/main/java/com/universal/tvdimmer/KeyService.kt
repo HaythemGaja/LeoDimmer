@@ -19,8 +19,12 @@ import android.widget.Toast
  *     dialog that never takes focus on the Mi Box never sees a key. Here there
  *     is no window to lose focus, so a press cannot be missed.
  *
- *  2. DRIVING. One key cycles Day -> Night -> Sleep -> Day. Any key exits
- *     blackout. The four optional 1.x mappings still work if they were set.
+ *  2. DRIVING. One key cycles Day -> Night -> Sleep -> Day, and a second key
+ *     (two buttons if you map both directions) tunes the mode in use -- Day
+ *     brightness, Night brightness or the Sleep glow -- so one pair of keys
+ *     covers all three modes. Held in Sleep, the tune key steps the lamp
+ *     colour instead. Any key exits blackout. The two optional 1.x mappings
+ *     still work if they were set.
  *
  * The service only swallows keys it is responsible for: everything else is
  * returned untouched, so normal navigation is never broken. HOME and POWER
@@ -158,11 +162,11 @@ class KeyService : AccessibilityService() {
 
         return when (keyCode) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) -> {
-                OverlayService.send(this, OverlayService.ACTION_BRIGHTER)
+                OverlayService.send(this, OverlayService.ACTION_TUNE, 1)
                 true
             }
             Settings.getKey(this, Settings.KEY_DIMMER) -> {
-                OverlayService.send(this, OverlayService.ACTION_DIMMER)
+                OverlayService.send(this, OverlayService.ACTION_TUNE, -1)
                 true
             }
             Settings.getKey(this, Settings.KEY_TOGGLE) -> {
@@ -177,23 +181,28 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    /**
+     * Holding the tune key steps the lamp colour (Sleep only, ignored
+     * elsewhere), so the colour needs no button of its own.
+     */
     private fun dispatchLongPress(keyCode: Int) {
         when (keyCode) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) ->
-                OverlayService.send(this, OverlayService.ACTION_SET_PERCENT, 100)
+                OverlayService.send(this, OverlayService.ACTION_TUNE_COLOUR, 1)
             Settings.getKey(this, Settings.KEY_DIMMER) ->
-                OverlayService.send(this, OverlayService.ACTION_SET_PERCENT, 0)
+                OverlayService.send(this, OverlayService.ACTION_TUNE_COLOUR, -1)
             Settings.getKey(this, Settings.KEY_TOGGLE) ->
                 OverlayService.send(this, OverlayService.ACTION_TOGGLE_AMBIENT)
         }
     }
 
+    /** A double press is the same tune, four steps at a time. */
     private fun dispatchDoublePress(keyCode: Int) {
         when (keyCode) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) ->
-                OverlayService.send(this, OverlayService.ACTION_SET_PERCENT, 75)
+                OverlayService.send(this, OverlayService.ACTION_TUNE, 4)
             Settings.getKey(this, Settings.KEY_DIMMER) ->
-                OverlayService.send(this, OverlayService.ACTION_SET_PERCENT, 25)
+                OverlayService.send(this, OverlayService.ACTION_TUNE, -4)
         }
     }
 

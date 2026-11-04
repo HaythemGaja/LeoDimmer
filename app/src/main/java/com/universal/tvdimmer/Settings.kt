@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.view.KeyEvent
+import kotlin.math.abs
+import kotlin.random.Random
 
 /**
  * LeoDimmer v2.0 -- one small store for everything the app shares.
@@ -44,6 +46,20 @@ object Settings {
     const val KEY_AMBIENT_COLOR_INDEX = "ambient_color_index"
     const val KEY_SLEEP_TIMER_MINUTES = "sleep_timer_minutes"
     const val KEY_SLEEP_TIMER_END = "sleep_timer_end_millis"
+
+    // How the lamp looks.
+    const val KEY_AMBIENT_GLOW = "ambient_glow"
+    const val KEY_AMBIENT_CLOCK = "ambient_clock"
+
+    // Sunset / sunrise.
+    const val KEY_SUN_SCHEDULE = "sun_schedule_enabled"
+    const val KEY_SUN_STATE = "sun_state"
+    const val KEY_SUN_LAT = "sun_latitude"
+    const val KEY_SUN_LON = "sun_longitude"
+
+    // The local web remote.
+    const val KEY_WEB_REMOTE = "web_remote_enabled"
+    const val KEY_WEB_PIN = "web_remote_pin"
 
     // Extras carried over from 1.x (kept working, no longer required).
     const val KEY_FADE_ENABLED = "fade_enabled"
@@ -122,6 +138,14 @@ object Settings {
     /** One manual step on the brightness rows. */
     const val STEP_PERCENT = 10
 
+    /** How far the tune key can push a mode down before it stops. */
+    const val DAY_MIN = 10
+    const val NIGHT_MIN = 10
+
+    /** Tune steps: Day is coarse, Night and the lamp are fine. */
+    const val DAY_TUNE_STEP = 10
+    const val NIGHT_TUNE_STEP = 5
+
     fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -155,6 +179,36 @@ object Settings {
 
     fun setNightBrightness(context: Context, percent: Int) {
         prefs(context).edit().putInt(KEY_NIGHT_BRIGHTNESS, percent.coerceIn(0, 100)).apply()
+    }
+
+    /**
+     * The number the tune key changes. Each mode keeps its own, so the key
+     * always tunes what is on screen -- and Day -> Night -> Day comes back to
+     * the value you tuned, which stepping the overlay's raw brightness did not.
+     */
+    fun getMoodValue(context: Context, mood: Int): Int = when (mood) {
+        MOOD_NIGHT -> getNightBrightness(context)
+        MOOD_SLEEP -> getAmbientLevel(context)
+        else -> getDayBrightness(context)
+    }
+
+    fun setMoodValue(context: Context, mood: Int, value: Int) {
+        when (mood) {
+            MOOD_NIGHT -> setNightBrightness(context, value.coerceIn(NIGHT_MIN, 100))
+            MOOD_SLEEP -> setAmbientLevel(context, value)
+            else -> setDayBrightness(context, value.coerceIn(DAY_MIN, 100))
+        }
+    }
+
+    /** One tune press (positive = more). Returns the value the mode now has. */
+    fun stepMoodValue(context: Context, mood: Int, steps: Int): Int {
+        val step = when (mood) {
+            MOOD_NIGHT -> NIGHT_TUNE_STEP
+            MOOD_SLEEP -> AMBIENT_STEP
+            else -> DAY_TUNE_STEP
+        }
+        setMoodValue(context, mood, getMoodValue(context, mood) + steps * step)
+        return getMoodValue(context, mood)
     }
 
     // ---- What is drawn ----
@@ -212,6 +266,14 @@ object Settings {
     fun ambientColorName(context: Context): String =
         AMBIENT_COLORS[getAmbientColorIndex(context)].first
 
+    /** Next (or previous) lamp colour, wrapping. Returns the new name. */
+    fun stepAmbientColor(context: Context, steps: Int): String {
+        val count = AMBIENT_COLORS.size
+        val index = ((getAmbientColorIndex(context) + steps) % count + count) % count
+        setAmbientColorIndex(context, index)
+        return AMBIENT_COLORS[index].first
+    }
+
     fun ambientColorValue(context: Context): Int =
         AMBIENT_COLORS[getAmbientColorIndex(context)].second
 
@@ -230,6 +292,129 @@ object Settings {
             (Color.green(color) * factor).toInt(),
             (Color.blue(color) * factor).toInt()
         )
+    }
+
+    // ---- Lamp look ----
+
+    /** 0 = a flat panel of colour, 100 = a tight hot spot. */
+    fun getAmbientGlow(context: Context): Int =
+        prefs(context).getInt(KEY_AMBIENT_GLOW, 60).coerceIn(0, 100)
+
+    fun setAmbientGlow(context: Context, percent: Int) {
+        prefs(context).edit().putInt(KEY_AMBIENT_GLOW, percent.coerceIn(0, 100)).apply()
+    }
+
+    fun isClockShown(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_AMBIENT_CLOCK, false)
+
+    fun setClockShown(context: Context, shown: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AMBIENT_CLOCK, shown).apply()
+    }
+
+    // ---- Sunset / sunrise ----
+
+    fun isSunScheduleEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_SUN_SCHEDULE, false)
+
+    fun setSunScheduleEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit()
+            .putBoolean(KEY_SUN_SCHEDULE, enabled)
+            .putInt(KEY_SUN_STATE, -1) // re-decide from scratch on the next tick
+            .apply()
+    }
+
+    /** -1 = not decided yet, 0 = day, 1 = night. */
+    fun getSunState(context: Context): Int = prefs(context).getInt(KEY_SUN_STATE, -1)
+
+    fun setSunState(context: Context, state: Int) {
+        prefs(context).edit().putInt(KEY_SUN_STATE, state).apply()
+    }
+
+    fun getSunLat(context: Context): Float = prefs(context).getFloat(KEY_SUN_LAT, 36.8f)
+
+    fun setSunLat(context: Context, latitude: Float) {
+        prefs(context).edit()
+            .putFloat(KEY_SUN_LAT, latitude.coerceIn(-60f, 60f))
+            .putInt(KEY_SUN_STATE, -1)
+            .apply()
+    }
+
+    fun getSunLon(context: Context): Float = prefs(context).getFloat(KEY_SUN_LON, 10.2f)
+
+    fun setSunLon(context: Context, longitude: Float) {
+        prefs(context).edit()
+            .putFloat(KEY_SUN_LON, longitude.coerceIn(-180f, 180f))
+            .putInt(KEY_SUN_STATE, -1)
+            .apply()
+    }
+
+    data class Place(val name: String, val latitude: Float, val longitude: Float)
+
+    /** A short list, so the sun needs no keyboard and no location permission. */
+    val PLACES = listOf(
+        Place("Tunis", 36.8f, 10.2f),
+        Place("Algiers", 36.8f, 3.1f),
+        Place("Casablanca", 33.6f, -7.6f),
+        Place("Cairo", 30.0f, 31.2f),
+        Place("Istanbul", 41.0f, 29.0f),
+        Place("Dubai", 25.2f, 55.3f),
+        Place("Riyadh", 24.7f, 46.7f),
+        Place("Paris", 48.9f, 2.4f),
+        Place("London", 51.5f, -0.1f),
+        Place("Berlin", 52.5f, 13.4f),
+        Place("Madrid", 40.4f, -3.7f),
+        Place("Rome", 41.9f, 12.5f),
+        Place("Moscow", 55.8f, 37.6f),
+        Place("Lagos", 6.5f, 3.4f),
+        Place("Johannesburg", -26.2f, 28.0f),
+        Place("New York", 40.7f, -74.0f),
+        Place("Toronto", 43.7f, -79.4f),
+        Place("Los Angeles", 34.1f, -118.2f),
+        Place("Mexico City", 19.4f, -99.1f),
+        Place("Sao Paulo", -23.6f, -46.6f),
+        Place("Delhi", 28.6f, 77.2f),
+        Place("Singapore", 1.4f, 103.8f),
+        Place("Tokyo", 35.7f, 139.7f),
+        Place("Sydney", -33.9f, 151.2f)
+    )
+
+    fun placeName(context: Context): String {
+        val match = PLACES.firstOrNull { place ->
+            abs(place.latitude - getSunLat(context)) < 0.6f &&
+                abs(place.longitude - getSunLon(context)) < 0.6f
+        }
+        return match?.name ?: "Custom"
+    }
+
+    /** Index of the matching place, so the row can step through the list. */
+    fun placeIndex(context: Context): Int {
+        val index = PLACES.indexOfFirst { place ->
+            abs(place.latitude - getSunLat(context)) < 0.6f &&
+                abs(place.longitude - getSunLon(context)) < 0.6f
+        }
+        return if (index < 0) 0 else index
+    }
+
+    // ---- Web remote ----
+
+    fun isWebRemoteEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_WEB_REMOTE, false)
+
+    fun setWebRemoteEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_WEB_REMOTE, enabled).apply()
+    }
+
+    /** The PIN, created on first use. Four digits, never empty. */
+    fun webPin(context: Context): String {
+        val stored = prefs(context).getString(KEY_WEB_PIN, "") ?: ""
+        if (stored.length == 4) return stored
+        return newWebPin(context)
+    }
+
+    fun newWebPin(context: Context): String {
+        val pin = (1000 + Random.nextInt(9000)).toString()
+        prefs(context).edit().putString(KEY_WEB_PIN, pin).apply()
+        return pin
     }
 
     // ---- Sleep timer ----

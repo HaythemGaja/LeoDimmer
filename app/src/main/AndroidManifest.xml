@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- The local web remote listens on the LAN; nothing is sent anywhere. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Draw the dimmer above every app. Granted in Settings, not at install. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Global remote-key interception; enabled by the user in Accessibility. -->

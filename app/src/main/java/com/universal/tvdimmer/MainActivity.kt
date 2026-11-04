@@ -20,6 +20,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * LeoDimmer v2.0 -- one screen, built for a D-pad.
@@ -149,6 +152,7 @@ class MainActivity : Activity() {
         addTuning()
         addPower()
         addAutomation()
+        addWebRemote()
         addRemote()
         addFooter()
         val restore = focused?.let { column.findViewWithTag<View>(it) }
@@ -186,7 +190,9 @@ class MainActivity : Activity() {
         row.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(pill)
         column.addView(row)
-        column.addView(info("One remote button: Day → Night → Sleep.", MUTED, 16f))
+        column.addView(
+            info("One key cycles Day → Night → Sleep; a second tunes the mode in use.", MUTED, 16f)
+        )
 
         // Only a trace from THIS build is shown (see CrashLog): a crash from an
         // older install survives an upgrade in the files directory, and v2.0
@@ -357,6 +363,31 @@ class MainActivity : Activity() {
             { Settings.AMBIENT_COLORS[it].first }
         )
         choiceRow(
+            "tune_glow_style", "Lamp glow", listOf(0, 30, 60, 100),
+            { Settings.getAmbientGlow(this) },
+            {
+                Settings.setAmbientGlow(this, it)
+                if (Settings.isAmbient(this)) applyCurrentMood()
+            },
+            {
+                when {
+                    it <= 0 -> "Flat"
+                    it < 45 -> "Soft"
+                    it < 90 -> "Round"
+                    else -> "Spot"
+                }
+            }
+        )
+        choiceRow(
+            "tune_clock", "Bedside clock", listOf(0, 1),
+            { if (Settings.isClockShown(this)) 1 else 0 },
+            {
+                Settings.setClockShown(this, it == 1)
+                if (Settings.isAmbient(this)) applyCurrentMood()
+            },
+            { if (it == 1) "On" else "Off" }
+        )
+        choiceRow(
             "tune_timer", "Sleep timer", Settings.SLEEP_TIMER_OPTIONS,
             { Settings.getSleepTimerMinutes(this) },
             {
@@ -471,28 +502,129 @@ class MainActivity : Activity() {
             { Settings.setTvPowerOffEnabled(this, it == 1) },
             { if (it == 1) "On" else "Off" }
         )
+        choiceRow(
+            "auto_sun", "Night at sunset, Day at sunrise", listOf(0, 1),
+            { if (Settings.isSunScheduleEnabled(this)) 1 else 0 },
+            {
+                Settings.setSunScheduleEnabled(this, it == 1)
+                OverlayService.send(this, null)
+            },
+            { if (it == 1) "On" else "Off" }
+        )
+        choiceRow(
+            "auto_place", "Place", Settings.PLACES.indices.toList(),
+            { Settings.placeIndex(this) },
+            {
+                val place = Settings.PLACES[it]
+                Settings.setSunLat(this, place.latitude)
+                Settings.setSunLon(this, place.longitude)
+                OverlayService.send(this, null)
+                // The computed sunrise/sunset line is for the old place until
+                // the sheet is rebuilt.
+                render()
+            },
+            { Settings.PLACES[it].name }
+        )
+        stepperRow(
+            "auto_lat", "Latitude", 1f,
+            { Settings.getSunLat(this) },
+            {
+                Settings.setSunLat(this, it)
+                OverlayService.send(this, null)
+            },
+            { "%.0f°".format(it) }
+        )
+        stepperRow(
+            "auto_lon", "Longitude", 5f,
+            { Settings.getSunLon(this) },
+            {
+                Settings.setSunLon(this, it)
+                OverlayService.send(this, null)
+            },
+            { "%.0f°".format(it) }
+        )
+        addSunInfo()
+        column.addView(spacer())
+    }
+
+    /** The computed times, so a wrong latitude is visible before it is trusted. */
+    private fun addSunInfo() {
+        val times = SunTimes.forDay(
+            System.currentTimeMillis(),
+            Settings.getSunLat(this).toDouble(),
+            Settings.getSunLon(this).toDouble()
+        )
+        if (times == null) {
+            column.addView(
+                info("The sun does not rise or set at this latitude today.", MUTED, 14f)
+            )
+            return
+        }
+        val format = SimpleDateFormat("HH:mm", Locale.getDefault())
+        column.addView(
+            info(
+                "Sunrise ${format.format(Date(times.first))} · " +
+                    "Sunset ${format.format(Date(times.second))} · " +
+                    Settings.placeName(this),
+                MUTED, 14f
+            )
+        )
+    }
+
+    /**
+     * The phone, without a cloud: a small HTTP server in this process. The PIN
+     * is the whole of the security, so it is shown here, never hidden.
+     */
+    private fun addWebRemote() {
+        section("PHONE   ·   LOCAL WEB REMOTE")
+        choiceRow(
+            "web_on", "Web remote", listOf(0, 1),
+            { if (Settings.isWebRemoteEnabled(this)) 1 else 0 },
+            {
+                Settings.setWebRemoteEnabled(this, it == 1)
+                if (it == 1) WebRemote.start(this) else WebRemote.stop()
+            },
+            { if (it == 1) "On" else "Off" }
+        )
+        addRow(
+            Row("web_pin", "PIN", { Settings.webPin(this) }, { ACCENT })
+        ) {
+            Settings.newWebPin(this)
+            toast("New PIN: ${Settings.webPin(this)}")
+            render()
+        }
+        val on = Settings.isWebRemoteEnabled(this)
+        column.addView(
+            info(
+                if (on) "Open ${WebRemote.address()} on your phone, on the same Wi-Fi, " +
+                    "then type the PIN."
+                else "Turn it on to control the dimmer from a phone on the same Wi-Fi.",
+                MUTED, 14f
+            )
+        )
+        if (on) column.addView(
+            info("LAN only — no cloud, no account. Anyone on your network with the PIN can use it.", MUTED, 14f)
+        )
         column.addView(spacer())
     }
 
     private fun addRemote() {
-        section("REMOTE   ·   ONE KEY IS ENOUGH")
-        val learning = Settings.learnTarget(this)
-        val modeRow = Row(
-            "key_mode", "Mode key",
-            {
-                if (learning == Settings.KEY_MODE_KEY) "Press a remote button…"
-                else Settings.keyLabel(this, Settings.KEY_MODE_KEY)
-            },
-            { if (learning.isNotEmpty()) ACCENT else MUTED }
+        section("REMOTE   ·   TWO KEYS ARE ENOUGH")
+        addKeyRow("key_mode", "Mode key", Settings.KEY_MODE_KEY)
+        addKeyRow("key_tune_up", "Tune ▲ · more", Settings.KEY_BRIGHTER)
+        addKeyRow("key_tune_down", "Tune ▼ · less", Settings.KEY_DIMMER)
+        column.addView(
+            info(
+                "Tune changes the mode you are in — Day brightness, Night " +
+                    "brightness or Sleep glow. Hold it in Sleep to step the colour. " +
+                    "No button of its own is needed for the other modes.",
+                MUTED, 14f
+            )
         )
-        modeRow.onOk = { startLearn(Settings.KEY_MODE_KEY) }
-        addRow(modeRow)
 
-        // 1.x mappings are kept, but only shown if this box already has them:
-        // the whole point of 2.0 is that nobody needs a second button.
+        // The remaining 1.x mappings are kept, but only shown if this box
+        // already has them: nothing here needs a fourth button.
         val legacy = listOf(
-            Settings.KEY_BRIGHTER to "Optional · brighter",
-            Settings.KEY_DIMMER to "Optional · dimmer",
             Settings.KEY_TOGGLE to "Optional · blackout",
             Settings.KEY_AMBIENT to "Optional · sleep light"
         )
@@ -529,7 +661,7 @@ class MainActivity : Activity() {
 
     private fun addFooter() {
         column.addView(info("◀ ▶ changes a value · OK selects · BACK leaves", MUTED, 15f))
-        column.addView(info("LeoDimmer 2.2", MUTED, 14f))
+        column.addView(info("LeoDimmer 2.4", MUTED, 14f))
     }
 
     // ---- Rows ----
@@ -615,6 +747,21 @@ class MainActivity : Activity() {
         column.addView(row)
     }
 
+    /** A learnable remote key: OK arms learning in the accessibility service. */
+    private fun addKeyRow(tag: String, title: String, key: String) {
+        val learning = Settings.learnTarget(this)
+        val row = Row(
+            tag, title,
+            {
+                if (learning == key) "Press a remote button…"
+                else Settings.keyLabel(this, key)
+            },
+            { if (learning == key) ACCENT else MUTED }
+        )
+        row.onOk = { startLearn(key) }
+        addRow(row)
+    }
+
     private fun choiceRow(
         tag: String,
         title: String,
@@ -635,6 +782,21 @@ class MainActivity : Activity() {
         }
         row.onLeft = { step(false) }
         row.onRight = { step(true) }
+        addRow(row)
+    }
+
+    /** A numeric row stepped with ◀ ▶, for values a list cannot hold. */
+    private fun stepperRow(
+        tag: String,
+        title: String,
+        step: Float,
+        get: () -> Float,
+        set: (Float) -> Unit,
+        label: (Float) -> String
+    ) {
+        val row = Row(tag, title, { label(get()) })
+        row.onLeft = { set(get() - step) }
+        row.onRight = { set(get() + step) }
         addRow(row)
     }
 

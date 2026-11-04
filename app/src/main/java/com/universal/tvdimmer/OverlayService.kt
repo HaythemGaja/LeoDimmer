@@ -16,12 +16,16 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.text.format.DateFormat
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 /**
  * LeoDimmer v2.0 -- the overlay.
@@ -51,6 +55,8 @@ import java.util.Calendar
  *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action SET_MOOD --ei value 1
  *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action CYCLE_MOOD
  *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action SET_PERCENT --ei value 30
+ *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action TUNE --ei value 1
+ *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action TUNE_COLOUR --ei value 1
  *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action TOGGLE_BLACKOUT
  *   adb shell am startservice -n com.universal.tvdimmer/.OverlayService --es action STOP
  */
@@ -62,6 +68,12 @@ class OverlayService : Service() {
         const val ACTION_SET_PERCENT = "SET_PERCENT"
         const val ACTION_BRIGHTER = "BRIGHTER"
         const val ACTION_DIMMER = "DIMMER"
+
+        /** Tune the mode in use. value = number of steps, negative = less. */
+        const val ACTION_TUNE = "TUNE"
+
+        /** Step the lamp colour. value = +1 / -1. Sleep only. */
+        const val ACTION_TUNE_COLOUR = "TUNE_COLOUR"
         const val ACTION_TOGGLE_BLACKOUT = "TOGGLE_BLACKOUT"
         const val ACTION_EXIT_BLACKOUT = "EXIT_BLACKOUT"
         const val ACTION_TOGGLE_AMBIENT = "TOGGLE_AMBIENT"
@@ -96,7 +108,7 @@ class OverlayService : Service() {
     }
 
     private var windowManager: WindowManager? = null
-    private var overlay: View? = null
+    private var overlay: LampView? = null
 
     /** What the overlay is currently filled with (see [applyTint]). */
     private var fillColor = Color.BLACK
@@ -113,6 +125,8 @@ class OverlayService : Service() {
     private val scheduleRunnable = object : Runnable {
         override fun run() {
             checkSchedule()
+            checkSunSchedule()
+            refreshClock()
             handler.postDelayed(this, 60_000)
         }
     }
@@ -157,6 +171,7 @@ class OverlayService : Service() {
         restoreSafeState()
         ensureOverlay()
         tvPowerReceiver = TvPowerLink.register(this)
+        syncWebRemote()
         handler.post(scheduleRunnable)
         scheduleIdle()
     }
@@ -189,8 +204,10 @@ class OverlayService : Service() {
                 Settings.setAmbientActive(this, false)
                 applyBrightness(value)
             }
-            ACTION_BRIGHTER -> adjustBrightness(Settings.STEP_PERCENT)
-            ACTION_DIMMER -> adjustBrightness(-Settings.STEP_PERCENT)
+            ACTION_BRIGHTER -> tuneMode(1)
+            ACTION_DIMMER -> tuneMode(-1)
+            ACTION_TUNE -> tuneMode(value)
+            ACTION_TUNE_COLOUR -> tuneColour(value)
             ACTION_TOGGLE_BLACKOUT -> toggleBlackout()
             ACTION_EXIT_BLACKOUT -> exitBlackout()
             ACTION_TOGGLE_AMBIENT -> if (Settings.isAmbient(this)) exitAmbient() else enterAmbient()
@@ -202,6 +219,8 @@ class OverlayService : Service() {
                 // Plain start (app opened, boot, key service connected):
                 // sync what is stored without a popup.
                 checkSchedule(force = true)
+                checkSunSchedule()
+                syncWebRemote()
                 applyBrightness(Settings.getBrightness(this), animate = false, showOsd = false)
                 scheduleIdle()
             }
@@ -211,6 +230,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        WebRemote.stop()
         handler.removeCallbacksAndMessages(null)
         sleepFadeStep = -1
         generalFadeStep = -1
@@ -238,7 +258,7 @@ class OverlayService : Service() {
         if (overlay != null) return
         if (!Settings.canDrawOverlays(this)) return
         try {
-            val dim = View(this).apply { setBackgroundColor(Color.BLACK) }
+            val dim = LampView(this).apply { setBackgroundColor(Color.BLACK) }
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -295,12 +315,24 @@ class OverlayService : Service() {
      * the dimming, so the panel emits light instead of filtering it.
      */
     private fun applyTint() {
-        fillColor = if (Settings.isAmbient(this)) {
-            Settings.ambientLampColor(this)
-        } else {
-            Color.BLACK
-        }
+        val lamp = Settings.isAmbient(this)
+        fillColor = if (lamp) Settings.ambientLampColor(this) else Color.BLACK
+        overlay?.setGlow(if (lamp) Settings.getAmbientGlow(this) else 0)
         overlay?.setBackgroundColor(fillColor)
+        refreshClock()
+    }
+
+    /** The bedtime clock, drawn by the lamp itself and empty outside Sleep. */
+    private fun refreshClock() {
+        val view = overlay ?: return
+        view.setClock(
+            if (Settings.isAmbient(this) && Settings.isClockShown(this)) {
+                val pattern = if (DateFormat.is24HourFormat(this)) "HH:mm" else "h:mm"
+                SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
+            } else {
+                null
+            }
+        )
     }
 
     private fun showOsd(message: String) {
@@ -361,16 +393,31 @@ class OverlayService : Service() {
         startAsForeground()
     }
 
-    private fun adjustBrightness(delta: Int) {
-        if (Settings.isAmbient(this)) {
-            val next = (Settings.getAmbientLevel(this) + delta).coerceIn(
-                Settings.AMBIENT_MIN, Settings.AMBIENT_MAX
-            )
-            Settings.setAmbientLevel(this, next)
-            applyBrightness(next)
-            return
+    /**
+     * The second remote key: one press moves the value of the mode in use.
+     * Day and Night tune their own brightness, Sleep tunes the lamp level.
+     *
+     * It writes the mode's own number, not the overlay's current brightness,
+     * so a tuned Day survives a trip through Night and back.
+     */
+    private fun tuneMode(steps: Int) {
+        if (steps == 0) return
+        val mood = Settings.getMood(this)
+        val value = Settings.stepMoodValue(this, mood, steps)
+        // Re-applying the mode is what makes the new value visible, and in
+        // Sleep it re-arms the timer, so tuning never races the fade-out.
+        applyMood(mood)
+        if (mood == Settings.MOOD_SLEEP) {
+            showOsd("Sleep lamp ${Settings.ambientColorName(this)} $value%")
         }
-        applyBrightness(Settings.getBrightness(this) + delta)
+    }
+
+    /** Held tune key in Sleep: the other half of a lamp is its colour. */
+    private fun tuneColour(steps: Int) {
+        if (steps == 0 || Settings.getMood(this) != Settings.MOOD_SLEEP) return
+        val name = Settings.stepAmbientColor(this, steps)
+        applyMood(Settings.MOOD_SLEEP)
+        showOsd("Sleep lamp $name")
     }
 
     // ---- Brightness ----
@@ -611,6 +658,29 @@ class OverlayService : Service() {
         }
     }
 
+    /**
+     * Night at sunset, Day at sunrise, from the stored position.
+     *
+     * It acts only when the sun's state CHANGES, so a manual Night at 22:00 is
+     * not undone a minute later -- while sunrise still wins in the morning. It
+     * stands down while the lamp is on or the picture is blacked out, so it can
+     * never interrupt a bedtime.
+     */
+    private fun checkSunSchedule() {
+        if (!Settings.isSunScheduleEnabled(this)) return
+        if (Settings.isAmbient(this) || Settings.isBlackout(this)) return
+        val night = SunTimes.isNight(
+            System.currentTimeMillis(),
+            Settings.getSunLat(this).toDouble(),
+            Settings.getSunLon(this).toDouble()
+        )
+        val state = if (night) 1 else 0
+        if (Settings.getSunState(this) == state) return
+        Settings.setSunState(this, state)
+        val mood = if (night) Settings.MOOD_NIGHT else Settings.MOOD_DAY
+        if (Settings.getMood(this) != mood) applyMood(mood)
+    }
+
     private fun resetIdle() {
         lastActivityMs = System.currentTimeMillis()
         Settings.prefs(this).edit()
@@ -640,7 +710,13 @@ class OverlayService : Service() {
         startAsForeground()
     }
 
+    /** The web remote lives and dies with the dimmer, never on its own. */
+    private fun syncWebRemote() {
+        if (Settings.isWebRemoteEnabled(this)) WebRemote.start(this) else WebRemote.stop()
+    }
+
     private fun stopDimmer() {
+        WebRemote.stop()
         handler.removeCallbacks(blackoutGuard)
         handler.removeCallbacks(scheduleRunnable)
         handler.removeCallbacks(idleRunnable)
