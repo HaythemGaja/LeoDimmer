@@ -1,4 +1,4 @@
-# LeoDimmer 2.5
+# LeoDimmer 2.6
 
 A dimmer for Android TV, built for the Xiaomi Mi Box 4 (Android 9 / API 28).
 It dims the picture over any app, and it is designed around one constraint:
@@ -221,6 +221,15 @@ button that was also the Mode button cycled modes instead of tuning. v2.5
 repairs stored mappings on start (Tune keeps a shared button, Mode is cleared
 and must be re-learned with a different button) and leaves a note on the
 screen saying what was cleared.
+
+Some buttons arrive with no Android name at all: the onn remote's spare
+buttons on a Mi Box read as KEYCODE_UNKNOWN, so older builds stored that 0
+as if it were a real button and every such button looked like the same one.
+v2.6 never stores UNKNOWN. A button Android cannot name is identified by its
+own hardware code instead, and shows on its row as "Button &lt;number&gt;"; a
+button with neither a name nor a hardware code is refused while learning
+("That button isn't recognised — try another button") and nothing is stored.
+A stored UNKNOWN from an older build is cleared on start, with a note.
 
 ## Behaviour worth knowing
 

@@ -116,21 +116,33 @@ class KeyService : AccessibilityService() {
                 toast("Cancelled")
                 return true
             }
-            val stolen = Settings.setKey(this, target, keyCode)
-            Settings.finishLearn(this, keyCode)
+            // A button Android has no name for (the onn remote's spare
+            // buttons on this box) must never be stored as UNKNOWN: every
+            // such button would look like the same button. Identify it by
+            // its hardware code instead; if it has neither a name nor a
+            // hardware code, stay in learning and say so.
+            val identity = Settings.keyIdentity(event)
+            if (identity == Settings.UNSET) {
+                toast("That button isn't recognised — try another button")
+                return true
+            }
+            val stolen = Settings.setKey(this, target, identity)
+            Settings.finishLearn(this, identity)
             toast(
-                if (stolen.isEmpty()) "Learned ${Settings.keyName(keyCode)}"
-                else "Learned ${Settings.keyName(keyCode)} — moved from ${stolen.joinToString(" and ")}"
+                if (stolen.isEmpty()) "Learned ${Settings.keyName(identity)}"
+                else "Learned ${Settings.keyName(identity)} — moved from ${stolen.joinToString(" and ")}"
             )
             // No service command here: the settings screen refreshes itself.
             return true
         }
 
-        val keyCode = event.keyCode
+        // The button's identity, not its raw keycode: two different buttons
+        // that Android calls UNKNOWN still have different hardware codes.
+        val key = Settings.keyIdentity(event)
 
         if (event.action == KeyEvent.ACTION_UP) {
-            longHandled.remove(keyCode)
-            return isMappedKey(keyCode)
+            longHandled.remove(key)
+            return isMappedKey(key)
         }
         if (event.action != KeyEvent.ACTION_DOWN) return false
 
@@ -151,32 +163,32 @@ class KeyService : AccessibilityService() {
 
         // ---- 3. The one key that matters ----
         val modeKey = Settings.getKey(this, Settings.KEY_MODE_KEY)
-        if (modeKey != Settings.UNSET && keyCode == modeKey) {
+        if (modeKey != Settings.UNSET && key == modeKey) {
             if (event.repeatCount == 0) {
                 OverlayService.send(this, OverlayService.ACTION_CYCLE_MOOD)
             }
             return true
         }
 
-        if (!isMappedKey(keyCode)) return false
+        if (!isMappedKey(key)) return false
 
         if (event.repeatCount > 0) {
-            if (keyCode !in longHandled) {
-                longHandled.add(keyCode)
-                dispatchLongPress(keyCode)
+            if (key !in longHandled) {
+                longHandled.add(key)
+                dispatchLongPress(key)
             }
             return true
         }
 
         val now = event.eventTime
-        val last = lastDownMs[keyCode] ?: 0L
-        lastDownMs[keyCode] = now
+        val last = lastDownMs[key] ?: 0L
+        lastDownMs[key] = now
         if (last != 0L && now - last < 400) {
-            dispatchDoublePress(keyCode)
+            dispatchDoublePress(key)
             return true
         }
 
-        return when (keyCode) {
+        return when (key) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) -> {
                 OverlayService.send(this, OverlayService.ACTION_TUNE, 1)
                 true
@@ -201,8 +213,8 @@ class KeyService : AccessibilityService() {
      * Holding the tune key steps the lamp colour (Sleep only, ignored
      * elsewhere), so the colour needs no button of its own.
      */
-    private fun dispatchLongPress(keyCode: Int) {
-        when (keyCode) {
+    private fun dispatchLongPress(key: Int) {
+        when (key) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) ->
                 OverlayService.send(this, OverlayService.ACTION_TUNE_COLOUR, 1)
             Settings.getKey(this, Settings.KEY_DIMMER) ->
@@ -213,8 +225,8 @@ class KeyService : AccessibilityService() {
     }
 
     /** A double press is the same tune, four steps at a time. */
-    private fun dispatchDoublePress(keyCode: Int) {
-        when (keyCode) {
+    private fun dispatchDoublePress(key: Int) {
+        when (key) {
             Settings.getKey(this, Settings.KEY_BRIGHTER) ->
                 OverlayService.send(this, OverlayService.ACTION_TUNE, 4)
             Settings.getKey(this, Settings.KEY_DIMMER) ->
@@ -222,13 +234,13 @@ class KeyService : AccessibilityService() {
         }
     }
 
-    private fun isMappedKey(keyCode: Int): Boolean {
-        if (keyCode == Settings.UNSET) return false
-        return keyCode == Settings.getKey(this, Settings.KEY_MODE_KEY) ||
-            keyCode == Settings.getKey(this, Settings.KEY_BRIGHTER) ||
-            keyCode == Settings.getKey(this, Settings.KEY_DIMMER) ||
-            keyCode == Settings.getKey(this, Settings.KEY_TOGGLE) ||
-            keyCode == Settings.getKey(this, Settings.KEY_AMBIENT)
+    private fun isMappedKey(key: Int): Boolean {
+        if (key == Settings.UNSET) return false
+        return key == Settings.getKey(this, Settings.KEY_MODE_KEY) ||
+            key == Settings.getKey(this, Settings.KEY_BRIGHTER) ||
+            key == Settings.getKey(this, Settings.KEY_DIMMER) ||
+            key == Settings.getKey(this, Settings.KEY_TOGGLE) ||
+            key == Settings.getKey(this, Settings.KEY_AMBIENT)
     }
 
     private fun toast(message: String) {

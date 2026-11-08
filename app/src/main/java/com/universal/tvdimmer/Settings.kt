@@ -511,6 +511,26 @@ object Settings {
 
     fun getKey(context: Context, key: String): Int = prefs(context).getInt(key, UNSET)
 
+    /**
+     * The identity of a physical button on a [KeyEvent]. Most buttons have an
+     * Android keycode, but some -- the onn remote's spare buttons on a Mi Box,
+     * whose key layout has no name for them -- arrive as KEYCODE_UNKNOWN.
+     * Storing that 0 as the mapping made every such button the SAME button:
+     * three different buttons all "UNKNOWN", Mode winning the tie. So an
+     * unknown keycode is never an identity on its own: the button's hardware
+     * scan code (stable per physical button) identifies it instead, stored
+     * as a negative number so it can never collide with a real keycode.
+     * UNSET means the press carried neither a name nor a hardware code and
+     * cannot be used for anything.
+     */
+    fun keyIdentity(event: KeyEvent): Int {
+        val code = event.keyCode
+        if (code != KeyEvent.KEYCODE_UNKNOWN) return code
+        val scan = event.scanCode
+        if (scan != 0) return -(scan + 1)
+        return UNSET
+    }
+
     /** Short label for a key mapping, for toasts and repair notes. */
     fun keyTitle(key: String): String = when (key) {
         KEY_MODE_KEY -> "Mode key"
@@ -561,6 +581,14 @@ object Settings {
         for (key in keepOrder) {
             val code = prefs(context).getInt(key, UNSET)
             if (code == UNSET) continue
+            // A stored 0 is poison from an older build: KEYCODE_UNKNOWN was
+            // stored as if it were a real button, so every unrecognised
+            // button looked like this one. It is not a button; clear it.
+            if (code == KeyEvent.KEYCODE_UNKNOWN) {
+                editor.putInt(key, UNSET)
+                cleared.add("${keyTitle(key)} — wasn't a real button (UNKNOWN)")
+                continue
+            }
             val keeper = seen[code]
             if (keeper != null) {
                 editor.putInt(key, UNSET)
@@ -640,9 +668,15 @@ object Settings {
         return if (code == UNSET) "Not set" else keyName(code)
     }
 
-    fun keyName(code: Int): String = KeyEvent.keyCodeToString(code)
-        .removePrefix("KEYCODE_")
-        .replace('_', ' ')
+    /** Display name for a stored button identity. */
+    fun keyName(code: Int): String = when {
+        code == UNSET -> "Not set"
+        // A button Android has no name for, identified by its hardware code.
+        code < -1 -> "Button ${-(code + 1)}"
+        else -> KeyEvent.keyCodeToString(code)
+            .removePrefix("KEYCODE_")
+            .replace('_', ' ')
+    }
 
     fun formatHour(hour: Int): String = "%02d:00".format(hour)
 

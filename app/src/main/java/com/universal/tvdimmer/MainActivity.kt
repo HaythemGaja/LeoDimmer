@@ -685,7 +685,7 @@ class MainActivity : Activity() {
 
     private fun addFooter() {
         column.addView(info("◀ ▶ changes a value · OK selects · BACK leaves", MUTED, 15f))
-        column.addView(info("LeoDimmer 2.5", MUTED, 14f))
+        column.addView(info("LeoDimmer 2.6", MUTED, 14f))
     }
 
     // ---- Rows ----
