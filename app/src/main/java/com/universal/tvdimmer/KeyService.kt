@@ -72,6 +72,19 @@ class KeyService : AccessibilityService() {
         }
         // Lets the settings screen show "connected", not just "enabled".
         Settings.markKeysReady(this)
+        // Older builds let one button belong to two actions, and Mode always
+        // won the tie, so a Tune button shared with Mode cycled modes instead
+        // of tuning. Repair that once, here, so the fix lands even if the
+        // settings screen is never opened -- and leave a note there saying
+        // what was cleared.
+        val cleared = Settings.deduplicateKeys(this)
+        if (cleared.isNotEmpty()) {
+            Settings.setRepairNote(
+                this,
+                "Fixed: ${cleared.joinToString("\n")}. Re-learn the cleared key with a different button."
+            )
+            toast("Fixed: ${cleared.joinToString("; ")}")
+        }
         if (Settings.canDrawOverlays(this)) OverlayService.send(this, null)
         toast("LeoDimmer remote is active")
     }
@@ -103,9 +116,12 @@ class KeyService : AccessibilityService() {
                 toast("Cancelled")
                 return true
             }
-            Settings.setKey(this, target, keyCode)
+            val stolen = Settings.setKey(this, target, keyCode)
             Settings.finishLearn(this, keyCode)
-            toast("Learned ${Settings.keyName(keyCode)}")
+            toast(
+                if (stolen.isEmpty()) "Learned ${Settings.keyName(keyCode)}"
+                else "Learned ${Settings.keyName(keyCode)} — moved from ${stolen.joinToString(" and ")}"
+            )
             // No service command here: the settings screen refreshes itself.
             return true
         }

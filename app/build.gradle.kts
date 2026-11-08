@@ -17,8 +17,8 @@ android {
         // Raise this to 30 in one line if you ever want a strict 11+ build.
         minSdk = 28
         targetSdk = 34
-        versionCode = 15
-        versionName = "2.4"
+        versionCode = 16
+        versionName = "2.5"
     }
 
     buildTypes {

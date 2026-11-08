@@ -86,6 +86,10 @@ object Settings {
     const val KEY_LEARNED = "learned_key"
     const val KEY_KEYS_READY_AT = "keys_ready_at"
 
+    // A repair note, shown on the settings screen after stored mappings
+    // from an older build are deduplicated (see deduplicateKeys).
+    const val KEY_DUP_REPAIR_NOTE = "duplicate_repair_note"
+
     /** Sentinel for "this key is not mapped". Never treated as a real key. */
     const val UNSET = -1
 
@@ -507,8 +511,77 @@ object Settings {
 
     fun getKey(context: Context, key: String): Int = prefs(context).getInt(key, UNSET)
 
-    fun setKey(context: Context, key: String, keyCode: Int) {
-        prefs(context).edit().putInt(key, keyCode).apply()
+    /** Short label for a key mapping, for toasts and repair notes. */
+    fun keyTitle(key: String): String = when (key) {
+        KEY_MODE_KEY -> "Mode key"
+        KEY_BRIGHTER -> "Tune ▲ · more"
+        KEY_DIMMER -> "Tune ▼ · less"
+        KEY_TOGGLE -> "Blackout key"
+        KEY_AMBIENT -> "Sleep light key"
+        else -> key
+    }
+
+    /**
+     * One button, one action. Learning a button for [key] takes it away from
+     * any other action that had it, and returns what it was taken from. A
+     * shared button used to fail silently with Mode winning: KeyService checks
+     * the Mode key first, so a Tune button that was also the Mode button
+     * cycled modes instead of tuning, and nothing said why. That can no
+     * longer happen.
+     */
+    fun setKey(context: Context, key: String, keyCode: Int): List<String> {
+        if (keyCode == UNSET) {
+            prefs(context).edit().putInt(key, UNSET).apply()
+            return emptyList()
+        }
+        val stolen = mutableListOf<String>()
+        val editor = prefs(context).edit()
+        for (other in listOf(KEY_MODE_KEY, KEY_BRIGHTER, KEY_DIMMER, KEY_TOGGLE, KEY_AMBIENT)) {
+            if (other != key && prefs(context).getInt(other, UNSET) == keyCode) {
+                editor.putInt(other, UNSET)
+                stolen.add(keyTitle(other))
+            }
+        }
+        editor.putInt(key, keyCode).apply()
+        return stolen
+    }
+
+    /**
+     * Repairs mappings stored by older builds, where one button could belong
+     * to two actions at once. Keeps the first action in keep order and clears
+     * the rest, returning one line per cleared mapping, e.g. "Mode key — same
+     * button as Tune ▲ · more". Tune outranks Mode here on purpose: a button
+     * the user presses expecting a tune must tune, not cycle modes.
+     */
+    fun deduplicateKeys(context: Context): List<String> {
+        val keepOrder = listOf(KEY_BRIGHTER, KEY_DIMMER, KEY_MODE_KEY, KEY_TOGGLE, KEY_AMBIENT)
+        val seen = mutableMapOf<Int, String>()
+        val cleared = mutableListOf<String>()
+        val editor = prefs(context).edit()
+        for (key in keepOrder) {
+            val code = prefs(context).getInt(key, UNSET)
+            if (code == UNSET) continue
+            val keeper = seen[code]
+            if (keeper != null) {
+                editor.putInt(key, UNSET)
+                cleared.add("${keyTitle(key)} — same button as ${keyTitle(keeper)}")
+            } else {
+                seen[code] = key
+            }
+        }
+        editor.apply()
+        return cleared
+    }
+
+    fun getRepairNote(context: Context): String? =
+        prefs(context).getString(KEY_DUP_REPAIR_NOTE, null)?.takeIf { it.isNotEmpty() }
+
+    fun setRepairNote(context: Context, note: String) {
+        prefs(context).edit().putString(KEY_DUP_REPAIR_NOTE, note).apply()
+    }
+
+    fun clearRepairNote(context: Context) {
+        prefs(context).edit().remove(KEY_DUP_REPAIR_NOTE).apply()
     }
 
     fun clearKeys(context: Context) {

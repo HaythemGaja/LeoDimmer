@@ -64,6 +64,18 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashLog.install(this)
+
+        // Older builds let one button belong to two actions, and Mode always
+        // won the tie, so a Tune button shared with Mode cycled modes instead
+        // of tuning. Repair stored mappings once, here and in the key service,
+        // and leave a note on the screen saying what was cleared.
+        val repaired = Settings.deduplicateKeys(this)
+        if (repaired.isNotEmpty()) {
+            Settings.setRepairNote(
+                this,
+                "Fixed: ${repaired.joinToString("\n")}. Re-learn the cleared key with a different button."
+            )
+        }
         window.setBackgroundDrawable(ColorDrawable(BG))
 
         // The dimmer lives in a foreground service. On 13+ the notification
@@ -613,6 +625,18 @@ class MainActivity : Activity() {
         addKeyRow("key_mode", "Mode key", Settings.KEY_MODE_KEY)
         addKeyRow("key_tune_up", "Tune ▲ · more", Settings.KEY_BRIGHTER)
         addKeyRow("key_tune_down", "Tune ▼ · less", Settings.KEY_DIMMER)
+        // A repair note from deduplicateKeys: a button that used to belong to
+        // two actions at once, and which mapping was cleared. Tap to dismiss.
+        Settings.getRepairNote(this)?.let { note ->
+            column.addView(info(note, BAD, 15f))
+            addRow(
+                Row("keys_repair_dismiss", "Dismiss this note", { "Press OK" }),
+                {
+                    Settings.clearRepairNote(this)
+                    render()
+                }
+            )
+        }
         column.addView(
             info(
                 "Tune changes the mode you are in — Day brightness, Night " +
@@ -661,7 +685,7 @@ class MainActivity : Activity() {
 
     private fun addFooter() {
         column.addView(info("◀ ▶ changes a value · OK selects · BACK leaves", MUTED, 15f))
-        column.addView(info("LeoDimmer 2.4", MUTED, 14f))
+        column.addView(info("LeoDimmer 2.5", MUTED, 14f))
     }
 
     // ---- Rows ----

@@ -1,4 +1,4 @@
-# LeoDimmer 2.4
+# LeoDimmer 2.5
 
 A dimmer for Android TV, built for the Xiaomi Mi Box 4 (Android 9 / API 28).
 It dims the picture over any app, and it is designed around one constraint:
@@ -213,6 +213,14 @@ no window here that can miss a press.
 
 `BACK` cancels. `HOME` and `POWER` cannot be mapped: Android delivers those to
 the system before any app sees them.
+
+One button, one action: learning a button for one row takes it away from any
+other row that had it, and the screen says so. Older builds let one button
+belong to two actions at once, and the Mode key was checked first, so a Tune
+button that was also the Mode button cycled modes instead of tuning. v2.5
+repairs stored mappings on start (Tune keeps a shared button, Mode is cleared
+and must be re-learned with a different button) and leaves a note on the
+screen saying what was cleared.
 
 ## Behaviour worth knowing
 
